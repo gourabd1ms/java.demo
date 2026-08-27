@@ -1,0 +1,23 @@
+name: Sonar Diag
+on:
+  workflow_dispatch:
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Diagnostics
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          echo "=== token validate (bearer) ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/authentication/validate"
+          echo "=== token validate (basic) ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -u "$SONAR_TOKEN:" "https://sonarqube.us/api/authentication/validate"
+          echo "=== current user (bearer) ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/users/current"
+          echo "=== orgs search no filter (bearer) ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/organizations/search"
+          echo "=== orgs search gourabd1ms (bearer) ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/organizations/search?organizations=gourabd1ms"
+          echo "=== orgs my_organizations (bearer) ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/organizations/search?member=true"
