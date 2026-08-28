@@ -4,34 +4,50 @@
 #
 # This talks to Sonar's newer Enterprise REST API (host: api.sonarqube.us,
 # everything hangs off /enterprises/...), NOT the classic on-prem
-# `api/views/*` Web API. That API is still being reverse-engineered (see
-# sonar-diag.yml) - confirmed behavior so far:
-#   - GET  /enterprises/enterprises/{id}                  -> 200
-#   - GET  /enterprises/portfolios/{id}                   -> 200
-#   - POST /enterprises/portfolios                        -> 200, creates a
-#           root-level portfolio (enterpriseId, name, description, selection)
-#   - POST /enterprises/portfolios with "parentPortfolioId" in the body
-#           -> 404 {"message":"Portfolio Hierarchy is not yet implemented."}
-#           i.e. nesting a child AT CREATE TIME is explicitly unsupported.
-#   - Bare collection endpoints (`/enterprises`, `/enterprises/organizations`,
-#     `/enterprises/projects`) are blocked by a gateway in front of the API
-#     and return HTTP 403 regardless of token validity.
+# `api/views/*` Web API. That API was reverse-engineered live (see
+# sonar-diag.yml and this repo's Action run history) since it has no public
+# docs and no exposed OpenAPI/Swagger spec. Confirmed facts:
+#
+#   - GET  /enterprises/enterprises/{id}     -> 200
+#   - GET  /enterprises/portfolios/{id}      -> 200
+#   - POST /enterprises/portfolios           -> 200, creates a root-level
+#           portfolio (body: enterpriseId, name, description, selection)
+#   - Bare collection endpoints, and ANY path containing the literal
+#     segment "projects" (e.g. /enterprises/projects,
+#     /enterprises/portfolios/{id}/projects/{key}) -> blocked by a gateway,
+#     HTTP 403, regardless of token validity or HTTP method.
 #   - Classic project listing works from the sonarqube.us host instead:
 #     GET https://sonarqube.us/api/components/search_projects?organization=...
+#   - No /v3/api-docs, /swagger.json etc. are exposed on this host.
 #
-# Since "Portfolio Hierarchy" is not implemented via create, step 4 below
-# tests the one remaining plausible mechanism: the portfolio schema already
-# exposes an (empty) "children" array on GET, so we try PATCHing that array
-# onto the PARENT (rather than setting parentPortfolioId on the child) to
-# see if that's how nesting is actually wired up. If neither this nor the
-# create-time attempt works, this workflow still produces 3 independent
-# portfolios (parent, child1, child2) with projects split across child1/
-# child2 - real nesting would then need to be done by hand in the Sonar UI,
-# or wait for Sonar to ship the feature.
+# TWO THINGS IN THIS WORKFLOW ARE CONFIRMED NOT TO WORK YET, AND ARE LEFT
+# IN PLACE ONLY AS BEST-EFFORT ATTEMPTS THAT ARE HARMLESS TO RUN:
 #
-# Step 6 (project assignment) similarly tries multiple candidate PATCH
-# payload shapes and reports which one actually raised projectCount above 0,
-# since that field name isn't documented either.
+#   1. Nesting child1/child2 under parent (step 4). Passing
+#      "parentPortfolioId" at create time returns an explicit
+#      HTTP 404 {"message":"Portfolio Hierarchy is not yet implemented."}
+#      Patching the parent's "children" array (the schema exposes that
+#      field on every GET) is tried instead, but does not change anything
+#      either (children stays [] on re-fetch). Net result: parent, child1,
+#      child2 are created as three independent root-level portfolios, NOT
+#      an actual nested hierarchy - Sonar's Enterprise API does not yet
+#      support that server-side.
+#
+#   2. Assigning specific projects to a portfolio via PATCH (step 6). The
+#      body field is "projects": [<object>], confirmed from a Jackson
+#      error naming `ChangePortfolioRequest.projects` /
+#      `PortfolioProjectRequest` - but every candidate field name tried for
+#      the object itself (key, project, projectKey, id, componentKey,
+#      component, projectId, name, uuid, projectKey+organizationId/Key,
+#      nested {project:{key}}, manualProjects, projectKeys, addProjects,
+#      projectKeysToAdd) is silently accepted (HTTP 200) and left
+#      projectCount at 0 - i.e. it's a no-op, not a validation error. This
+#      looks like an unfinished part of the API rather than a naming
+#      mistake on our side.
+#
+# If Sonar ships either feature later, or if you find the right shape from
+# their docs/support, only steps 4 and 6 need updating - discovery,
+# portfolio creation, and the demo-project split all work today.
 # ============================================================================
 name: Sonar Create Portfolio Hierarchy
 
