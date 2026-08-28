@@ -1,0 +1,72 @@
+# Throwaway diagnostic workflow (round 3). Safe to delete afterward.
+# Hypothesis: this Enterprise API uses internal UUIDs/ids everywhere else
+# (enterpriseId, organizationId, portfolioId) - maybe PortfolioProjectRequest
+# wants the project's internal projectId / projectUuidV4, not its
+# human-readable "key" slug (which is what every prior attempt used).
+name: Probe Portfolio Project Field Round 3
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
+      BASE: https://api.sonarqube.us
+      ORG_ID: 705a240f-23f9-4524-86cf-f50f6ccac3a8
+      TARGET_PORTFOLIO: afdd07ac-c27c-4531-984a-2ebadead6101
+      # java.demo, from the earlier components/search_projects response
+      PROJECT_KEY: gourabd1ms_java.demo
+      PROJECT_ID: AaBFGAzFTQfVhiojijEq
+      PROJECT_UUID: 6aefd5a1-006c-4425-91ab-bc4a22a509e8
+    steps:
+      - name: A. projectId alone
+        run: |
+          echo "=== {projectId} ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projects\":[{\"projectId\":\"$PROJECT_ID\"}]}" \
+            "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO"
+
+      - name: B. id = projectUuidV4
+        run: |
+          echo "=== {id: projectUuidV4} ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projects\":[{\"id\":\"$PROJECT_UUID\"}]}" \
+            "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO"
+
+      - name: C. projectUuid field
+        run: |
+          echo "=== {projectUuid} ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projects\":[{\"projectUuid\":\"$PROJECT_UUID\"}]}" \
+            "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO"
+
+      - name: D. projectId + organizationId
+        run: |
+          echo "=== {projectId, organizationId} ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projects\":[{\"projectId\":\"$PROJECT_ID\",\"organizationId\":\"$ORG_ID\"}]}" \
+            "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO"
+
+      - name: E. key + organizationId (untried combo)
+        run: |
+          echo "=== {key, organizationId} ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projects\":[{\"key\":\"$PROJECT_KEY\",\"organizationId\":\"$ORG_ID\"}]}" \
+            "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO"
+
+      - name: F. projectKey alone (isolated, no org fields)
+        run: |
+          echo "=== {projectKey alone} ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projects\":[{\"projectKey\":\"$PROJECT_KEY\"}]}" \
+            "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO"
+
+      - name: G. Re-fetch target portfolio to see final state
+        run: |
+          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO" | jq .
