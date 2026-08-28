@@ -5,17 +5,26 @@ jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
-      - name: Extract spec references from docs page
+      - name: Try SwaggerHub spec fetch
         run: |
-          curl -sL "https://api-docs.sonarsource.com/sonarqube-cloud/default/landing" -o /tmp/landing.html
-          wc -c /tmp/landing.html
+          for owner in sonarsource SonarSource sonarqube sonar-source; do
+            echo "trying owner=$owner"
+            curl -s -o /tmp/spec.json -w "HTTP:%{http_code}\n" "https://api.swaggerhub.com/apis/$owner/sonarqube-cloud/default"
+            head -c 200 /tmp/spec.json
+            echo
+          done
+          echo "=== swaggerhub search ==="
+          curl -s -w "\nHTTP:%{http_code}\n" "https://api.swaggerhub.com/specs?query=sonarqube-cloud" | head -c 2000
+          echo
           python3 -c "
-          import re
-          html = open('/tmp/landing.html', errors='ignore').read()
-          for m in re.finditer(r'apiDescriptionUrl[=:]\s*[\"\']([^\"\']+)[\"\']', html, re.I):
-              print('API_DESC_URL:', m.group(1))
-          for m in re.finditer(r'[\"\']([^\"\']*\.(?:json|yaml|yml))[\"\']', html, re.I):
-              print('JSON_YAML_REF:', m.group(1))
-          for m in re.finditer(r'src=[\"\']([^\"\']+)[\"\']', html, re.I):
-              print('SCRIPT_SRC:', m.group(1))
+          import json
+          try:
+              d = json.load(open('/tmp/spec.json'))
+              paths = list(d.get('paths', {}).keys())
+              print('TOTAL_PATHS:', len(paths))
+              for p in paths:
+                  if 'dop' in p.lower() or 'analysis' in p.lower() or 'bound' in p.lower() or 'automatic' in p.lower() or 'binding' in p.lower():
+                      print('HIT:', p)
+          except Exception as e:
+              print('parse error', e)
           "
