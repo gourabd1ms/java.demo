@@ -1,0 +1,32 @@
+name: Sonar Diag
+on:
+  workflow_dispatch:
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe v2 API
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          echo "=== bound-projects list ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/dop-translation/bound-projects"
+          echo "=== dop-translation ALM info ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/dop-translation/github-configurations"
+          echo "=== bound projects filter by project java.demo ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/dop-translation/bound-projects?projectKey=gourabd1ms_java.demo"
+          echo "=== api-docs openapi spec probe ==="
+          curl -s -o /tmp/openapi.json -w "\nHTTP:%{http_code}\n" "https://api-docs.sonarsource.com/sonarqube-cloud/default/openapi.json"
+          echo "size:"; wc -c /tmp/openapi.json
+          echo "=== grep dop-translation and analysis paths from spec if present ==="
+          python3 -c "
+import json
+try:
+    d = json.load(open('/tmp/openapi.json'))
+    paths = list(d.get('paths', {}).keys())
+    for p in paths:
+        if 'dop' in p.lower() or 'analysis' in p.lower() or 'bound' in p.lower() or 'automatic' in p.lower():
+            print(p)
+except Exception as e:
+    print('parse error', e)
+"
