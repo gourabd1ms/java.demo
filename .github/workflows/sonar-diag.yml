@@ -1,0 +1,79 @@
+name: Sonar Diag
+on:
+  workflow_dispatch:
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    env:
+      SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
+      BASE: https://api.sonarqube.us
+      ENTERPRISE_ID: 896d0782-65b7-4d6f-ac7c-29d00e2ec684
+      ORG_ID: 705a240f-23f9-4524-86cf-f50f6ccac3a8
+      TARGET_PORTFOLIO: bdaa34e3-9af7-4d1b-a3b3-69d367dea0ac
+    steps:
+      # ------------------------------------------------------------------
+      # A. List sub-resources directly under /enterprises to discover the real API surface
+      # ------------------------------------------------------------------
+      - name: "A. GET /enterprises (root collection)"
+        run: |
+          echo "--- GET $BASE/enterprises ---"
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises"
+
+      - name: "B. GET /enterprises/enterprises/{id}"
+        run: |
+          echo "--- GET $BASE/enterprises/enterprises/$ENTERPRISE_ID ---"
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/enterprises/$ENTERPRISE_ID"
+
+      - name: "C. GET /enterprises/organizations"
+        run: |
+          echo "--- GET $BASE/enterprises/organizations?enterpriseId=$ENTERPRISE_ID ---"
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/organizations?enterpriseId=$ENTERPRISE_ID"
+
+      - name: "D. GET /enterprises/organizations/{id}"
+        run: |
+          echo "--- GET $BASE/enterprises/organizations/$ORG_ID ---"
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/organizations/$ORG_ID"
+
+      - name: "E. GET /enterprises/projects (list projects, enterprise-scoped)"
+        run: |
+          echo "--- GET $BASE/enterprises/projects?enterpriseId=$ENTERPRISE_ID ---"
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/projects?enterpriseId=$ENTERPRISE_ID"
+
+      - name: "F. GET /enterprises/projects (list projects, org-scoped)"
+        run: |
+          echo "--- GET $BASE/enterprises/projects?organizationId=$ORG_ID ---"
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/projects?organizationId=$ORG_ID"
+
+      # ------------------------------------------------------------------
+      # G-I. Try alternate field names for the project entry in the PATCH projects[] array,
+      # against the already-created zzz-demo-cleanup-me portfolio (no new portfolio created).
+      # Prior run told us: projects[] must be objects (not strings), field name still unconfirmed.
+      # ------------------------------------------------------------------
+      - name: "G. PATCH projects with key field"
+        run: |
+          echo "--- PATCH projects:[{key:...}] ---"
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projects\":[{\"key\":\"gourabd1ms_java.demo\"}]}" \
+            "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO"
+
+      - name: "H. PATCH projects with project field"
+        run: |
+          echo "--- PATCH projects:[{project:...}] ---"
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projects\":[{\"project\":\"gourabd1ms_java.demo\"}]}" \
+            "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO"
+
+      - name: "I. PATCH projects with projectKey plus organizationId"
+        run: |
+          echo "--- PATCH projects:[{projectKey, organizationId}] ---"
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"selection\":\"projects\",\"projects\":[{\"projectKey\":\"gourabd1ms_java.demo\",\"organizationId\":\"$ORG_ID\"}]}" \
+            "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO"
+
+      - name: "J. Re-fetch target portfolio to confirm state"
+        run: |
+          echo "--- GET target portfolio after attempts ---"
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO"
