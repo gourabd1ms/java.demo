@@ -5,7 +5,7 @@ jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
-      - name: List webservices related to analysis method
+      - name: Broader search
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
@@ -13,11 +13,15 @@ jobs:
           python3 -c "
           import json
           d = json.load(open('/tmp/ws.json'))
+          raw = json.dumps(d).lower()
+          print('AUTOMATIC_MENTIONS:', raw.count('automatic'))
+          for ws in d['webServices']:
+              if ws['path'] in ('api/alm_settings', 'api/devops_platform', 'api/project_analyses', 'api/projects', 'api/new_code_periods', 'api/ci'):
+                  print('=== ' + ws['path'] + ' ===')
+                  for a in ws['actions']:
+                      print(' ', a['key'])
           for ws in d['webServices']:
               for a in ws['actions']:
-                  blob = json.dumps(a).lower()
-                  if 'automatic' in blob or 'analysis_method' in blob or ('analysis' in blob and 'mode' in blob):
-                      print(ws['path'] + '/' + a['key'], '|', a.get('description','')[:200])
-                      for p in a.get('params', []):
-                          print('    param:', p['key'], p.get('description','')[:100])
+                  if 'automatic' in json.dumps(a).lower():
+                      print('MATCH:', ws['path'] + '/' + a['key'])
           "
