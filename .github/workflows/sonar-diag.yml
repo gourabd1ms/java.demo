@@ -5,8 +5,19 @@ jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
-      - name: List projects in org
+      - name: List webservices related to analysis method
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
-          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/projects/search?organization=gourabd1ms&ps=100"
+          curl -s -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/webservices/list?include_internals=true" -o /tmp/ws.json
+          python3 -c "
+import json
+d = json.load(open('/tmp/ws.json'))
+for ws in d['webServices']:
+    for a in ws['actions']:
+        blob = json.dumps(a).lower()
+        if 'automatic' in blob or 'analysis_method' in blob or ('analysis' in blob and 'mode' in blob):
+            print(ws['path'] + '/' + a['key'], '|', a.get('description','')[:200])
+            for p in a.get('params', []):
+                print('    param:', p['key'], p.get('description','')[:100])
+"
