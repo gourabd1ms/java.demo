@@ -46,16 +46,19 @@ jobs:
             "$BASE/enterprises/portfolios?enterpriseId=$ENTERPRISE_ID"
 
       # ------------------------------------------------------------------
-      # 4. CREATE: attempt to create a new top-level portfolio (manual selection)
-      # Expected: either 201 with new portfolio id, or 400 revealing required fields
+      # 4. CREATE: attempt to create a new top-level portfolio with an explicit project list.
+      # Fixed after run 1: selection enum is ["projects","tags","organizations","regex","none"];
+      # "projects" is the explicit-list mode. Also fixed the project item shape after run 1's
+      # PATCH error: each entry must be an object like {"projectKey": "..."}, not a bare string.
+      # Expected: 200/201 with new portfolio id, projects=[java.demo, py.demo]
       # Resource is clearly named zzz-demo-cleanup-me for later manual deletion.
       # ------------------------------------------------------------------
-      - name: "4. POST create portfolio (manual selection)"
+      - name: "4. POST create portfolio (projects selection, explicit list)"
         run: |
-          echo "--- POST /enterprises/portfolios (manual selection) ---"
+          echo "--- POST /enterprises/portfolios (projects selection) ---"
           http_code=$(curl -s -o /tmp/create_manual.json -w "%{http_code}" -X POST \
             -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"zzz-demo-cleanup-me\",\"description\":\"Created via GitHub Actions API exploration - safe to delete\",\"selection\":\"manual\"}" \
+            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"zzz-demo-cleanup-me\",\"description\":\"Created via GitHub Actions API exploration - safe to delete\",\"selection\":\"projects\",\"projects\":[{\"projectKey\":\"gourabd1ms_java.demo\"},{\"projectKey\":\"gourabd1ms_py.demo\"}]}" \
             "$BASE/enterprises/portfolios")
           echo "HTTP:$http_code"
           cat /tmp/create_manual.json
@@ -77,14 +80,16 @@ jobs:
 
       # ------------------------------------------------------------------
       # 6. CREATE: attempt a NESTED (child) portfolio under the existing test-portfolio
-      # Expected: 201 with new portfolio id, parentPortfolioId = $PORTFOLIO_ID
+      # Fixed after run 1: selection enum is ["projects","tags","organizations","regex","none"],
+      # not "manual" - using "projects" here for an explicit project-list-based portfolio.
+      # Expected: 201/200 with new portfolio id, parentPortfolioId = $PORTFOLIO_ID
       # ------------------------------------------------------------------
       - name: "6. POST create nested/child portfolio"
         run: |
           echo "--- POST /enterprises/portfolios (nested under test-portfolio) ---"
           http_code=$(curl -s -o /tmp/create_nested.json -w "%{http_code}" -X POST \
             -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"zzz-demo-nested-cleanup-me\",\"description\":\"Nested portfolio - safe to delete\",\"selection\":\"manual\",\"parentPortfolioId\":\"$PORTFOLIO_ID\"}" \
+            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"zzz-demo-nested-cleanup-me\",\"description\":\"Nested portfolio - safe to delete\",\"selection\":\"projects\",\"parentPortfolioId\":\"$PORTFOLIO_ID\"}" \
             "$BASE/enterprises/portfolios")
           echo "HTTP:$http_code"
           cat /tmp/create_nested.json
@@ -105,7 +110,10 @@ jobs:
       # ------------------------------------------------------------------
       # 8. ADD PROJECT: attempt to add a demo project to the newly created manual portfolio
       # Trying REST-nested-collection convention: POST /enterprises/portfolios/{id}/projects
-      # Expected: 200/201 on success, or 404/400 revealing the real endpoint/shape
+      # Run 1 result: HTTP 403 with an odd "Invalid key=value pair ... Authorization header"
+      # message - this doesn't look like a real route for this resource (likely misrouted to
+      # a different backend/gateway that expects a different auth scheme). Kept for the record;
+      # the working approach is PATCH on the portfolio resource itself (see step 9).
       # ------------------------------------------------------------------
       - name: "8. POST add project to portfolio (nested collection attempt)"
         if: steps.extract.outputs.new_id != ''
@@ -119,16 +127,18 @@ jobs:
 
       # ------------------------------------------------------------------
       # 9. ADD PROJECT (alt): attempt via PATCH on the portfolio resource itself with a projects array
+      # Fixed after run 1: server error said projects[] must deserialize to
+      # PortfolioProjectRequest objects, not plain strings - trying {"projectKey": ...} objects.
       # Expected: 200 on success updating projects list, or error revealing correct shape
       # ------------------------------------------------------------------
       - name: "9. PATCH add project via portfolio update"
         if: steps.extract.outputs.new_id != ''
         run: |
           NEW_ID="${{ steps.extract.outputs.new_id }}"
-          echo "--- PATCH /enterprises/portfolios/$NEW_ID (projects array) ---"
+          echo "--- PATCH /enterprises/portfolios/$NEW_ID (projects array of objects) ---"
           curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
             -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"projects\":[\"gourabd1ms_java.demo\",\"gourabd1ms_py.demo\"]}" \
+            -d "{\"projects\":[{\"projectKey\":\"gourabd1ms_java.demo\"},{\"projectKey\":\"gourabd1ms_py.demo\"}]}" \
             "$BASE/enterprises/portfolios/$NEW_ID"
 
       # ------------------------------------------------------------------
@@ -176,6 +186,18 @@ jobs:
           curl -s -w "\nHTTP:%{http_code}\n" \
             -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
             "https://sonarqube.us/api/components/tree?component=$PORTFOLIO_ID"
+
+      # ------------------------------------------------------------------
+      # 14. Try the enterprise API's own measures convention (classic v1 API rejected the
+      # portfolio UUID as an unknown component key in run 1 - these two API surfaces use
+      # separate key-spaces). Expected: 200 with metrics, or 404 if this path doesn't exist.
+      # ------------------------------------------------------------------
+      - name: "14. GET portfolio measures (enterprise API convention)"
+        run: |
+          echo "--- GET /enterprises/portfolios/$PORTFOLIO_ID/measures ---"
+          curl -s -w "\nHTTP:%{http_code}\n" \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "$BASE/enterprises/portfolios/$PORTFOLIO_ID/measures"
 
       - name: Summary
         if: always()
