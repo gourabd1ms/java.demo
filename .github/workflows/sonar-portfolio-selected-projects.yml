@@ -1,0 +1,117 @@
+# ============================================================================
+# Sonar: create a new portfolio and assign 3 specific demo projects to it
+# (c.demo, cpp.demo, java.demo) - a fixed hand-picked list, unlike
+# sonar-create-portfolio-hierarchy.yml which dynamically discovers and
+# splits ALL demo projects.
+#
+# Talks to Sonar's Enterprise REST API (host: api.sonarqube.us, everything
+# hangs off /enterprises/...). See sonar-create-portfolio-hierarchy.yml's
+# header comment for the full list of confirmed API behavior. Relevant here:
+#
+#   - POST  /enterprises/portfolios       -> 200, creates a root portfolio.
+#   - PATCH /enterprises/portfolios/{id}  -> 200, and the "projects" field
+#     is confirmed to be the right body key (from a Jackson error naming
+#     `ChangePortfolioRequest.projects` / `PortfolioProjectRequest`), but
+#     ~20 different shapes for what goes INSIDE that array were tried by
+#     hand across two Action runs (key, project, projectKey, id,
+#     componentKey, projectId, projectUuid, every key+organizationId/Key
+#     combination, nested {project:{key}}, manualProjects, projectKeys,
+#     addProjects, projectKeysToAdd, ...) and EVERY one is silently
+#     accepted (HTTP 200) while leaving projectCount at 0. No
+#     OpenAPI/Swagger docs are exposed on this host to check against, and
+#     any URL path containing the literal segment "projects" is blocked by
+#     a gateway, ruling out a path-based alternative.
+#
+# Conclusion: project assignment isn't wired up server-side yet on this
+# API (same category of gap as "Portfolio Hierarchy is not yet
+# implemented" for nesting). Step 2 below still makes a best-effort
+# attempt with the most plausible shape and a couple of fallbacks, purely
+# so this workflow starts working automatically the moment Sonar ships
+# it - and step 3 tells you plainly, via projectCount, whether it
+# actually took effect on this run.
+# ============================================================================
+name: Sonar Assign Selected Projects To New Portfolio
+
+on:
+  workflow_dispatch:
+
+jobs:
+  assign-selected-projects:
+    runs-on: ubuntu-latest
+    env:
+      SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
+      BASE: https://api.sonarqube.us
+      ENTERPRISE_ID: 896d0782-65b7-4d6f-ac7c-29d00e2ec684
+      ORG_ID: 705a240f-23f9-4524-86cf-f50f6ccac3a8
+      # The 3 hand-picked demo projects to assign - edit this list to
+      # change which projects get assigned.
+      SELECTED_PROJECT_KEYS: >-
+        ["gourabd1ms_c.demo","gourabd1ms_cpp.demo","gourabd1ms_java.demo"]
+    steps:
+
+      # ----------------------------------------------------------------
+      # 1. Create the new portfolio.
+      # ----------------------------------------------------------------
+      - name: "1. Create portfolio"
+        id: portfolio
+        run: |
+          echo "--- POST /enterprises/portfolios ---"
+          RESP=$(curl -s -w "\nHTTP:%{http_code}" -X POST \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"selected-demo-projects\",\"description\":\"Holds c.demo, cpp.demo and java.demo - auto-created by GitHub Action\",\"selection\":\"projects\"}" \
+            "$BASE/enterprises/portfolios")
+          echo "$RESP"
+          PORTFOLIO_ID=$(echo "${RESP%$'\n'HTTP:*}" | jq -r '.id')
+          echo "Portfolio id: $PORTFOLIO_ID"
+          echo "id=$PORTFOLIO_ID" >> "$GITHUB_OUTPUT"
+
+      # ----------------------------------------------------------------
+      # 2. Best-effort attempt to assign the 3 selected projects. Tries a
+      #    couple of plausible payload shapes and stops at the first one
+      #    that raises projectCount above 0 (see header comment - none
+      #    are confirmed to work today, but this makes the workflow
+      #    self-healing if/when Sonar fixes the backend).
+      # ----------------------------------------------------------------
+      - name: "2. Assign selected projects"
+        run: |
+          PORTFOLIO_ID="${{ steps.portfolio.outputs.id }}"
+          PROJECTS="$SELECTED_PROJECT_KEYS"
+
+          # Build the two candidate shapes for the "projects" array items.
+          BY_KEY=$(echo "$PROJECTS" | jq -c '[.[] | {key: .}]')
+          BY_PROJECTKEY_ORG=$(echo "$PROJECTS" | jq -c --arg org "$ORG_ID" '[.[] | {projectKey: ., organizationId: $org}]')
+
+          echo "--- candidate 1: {\"projects\":[{\"key\":...}, ...]} ---"
+          RESP=$(curl -s -w "\nHTTP:%{http_code}" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projects\":$BY_KEY}" \
+            "$BASE/enterprises/portfolios/$PORTFOLIO_ID")
+          echo "$RESP"
+          COUNT=$(echo "${RESP%$'\n'HTTP:*}" | jq -r '.projectCount // 0')
+
+          if [ "$COUNT" = "0" ] || [ -z "$COUNT" ]; then
+            echo "--- candidate 2: {\"projects\":[{\"projectKey\":...,\"organizationId\":...}, ...]} ---"
+            RESP=$(curl -s -w "\nHTTP:%{http_code}" -X PATCH \
+              -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+              -d "{\"projects\":$BY_PROJECTKEY_ORG}" \
+              "$BASE/enterprises/portfolios/$PORTFOLIO_ID")
+            echo "$RESP"
+          fi
+
+      # ----------------------------------------------------------------
+      # 3. Verify and report plainly whether it actually took effect.
+      # ----------------------------------------------------------------
+      - name: "3. Verify"
+        run: |
+          PORTFOLIO_ID="${{ steps.portfolio.outputs.id }}"
+          BODY=$(curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PORTFOLIO_ID")
+          echo "$BODY" | jq .
+
+          COUNT=$(echo "$BODY" | jq -r '.projectCount // 0')
+          echo "Portfolio URL: https://sonarqube.us/enterprise/morganstanley/portfolios/$PORTFOLIO_ID"
+
+          if [ "$COUNT" = "0" ]; then
+            echo "::warning::projectCount is still 0 - project assignment did not take effect (known API limitation, see header comment). The portfolio itself was created successfully; the 3 projects will need to be added manually in the Sonar UI for now."
+          else
+            echo "Success: $COUNT project(s) assigned."
+          fi
