@@ -5,15 +5,11 @@ jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
-      - name: Search portal.swaggerhub.com refs
+      - name: Try common spec-download suffixes on the docs page itself
         run: |
-          curl -sL "https://api-docs.sonarsource.com/sonarqube-cloud/default/public-sonarcloud-organizations-enterprises-external-1-0-1" -o /tmp/page.html
-          wc -c /tmp/page.html
-          grep -o "portal.swaggerhub.com/[a-zA-Z0-9_./-]*" /tmp/page.html | sort -u
-          echo "--- try portal domain definition fetch ---"
-          curl -s -w "\nHTTP:%{http_code}\n" "https://portal.swaggerhub.com/services/api/apis/SonarSource/PUBLIC-sonarcloud-organizations-enterprises-external/1.0.1"
-          echo "--- try sonarsource org slug on portal ---"
-          curl -s -w "\nHTTP:%{http_code}\n" "https://api-docs.sonarsource.com/services/api/apis/SonarSource/PUBLIC-sonarcloud-organizations-enterprises-external/1.0.1" | head -c 1000
-          echo
-          echo "--- generic portal apis list for this docs site ---"
-          curl -s -w "\nHTTP:%{http_code}\n" "https://api-docs.sonarsource.com/services/api/apis" | head -c 2000
+          BASE="https://api-docs.sonarsource.com/sonarqube-cloud/default/public-sonarcloud-organizations-enterprises-external-1-0-1"
+          for suffix in ".json" "/openapi.json" "/swagger.json" "?format=json" "/download"; do
+            echo "--- $BASE$suffix ---"
+            curl -sL -w "\nHTTP:%{http_code}\n" "$BASE$suffix" | head -c 300
+            echo
+          done
