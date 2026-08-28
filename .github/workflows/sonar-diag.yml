@@ -1,0 +1,15 @@
+name: Sonar Diag
+on:
+  workflow_dispatch:
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test enterprise API
+        env:
+          ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
+        run: |
+          curl -s -w "\nHTTP:%{http_code}\n" -X GET \
+            "https://api.sonarqube.us/enterprises/enterprises?enterpriseKey=gourabd1ms" \
+            -H "accept: application/json" \
+            -H "Authorization: Bearer $ENT_TOKEN"
