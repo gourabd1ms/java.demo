@@ -1,0 +1,183 @@
+name: Portfolio API Exploration
+on:
+  workflow_dispatch:
+jobs:
+  explore:
+    runs-on: ubuntu-latest
+    env:
+      SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
+      ENTERPRISE_KEY: morganstanley
+      ENTERPRISE_ID: 896d0782-65b7-4d6f-ac7c-29d00e2ec684
+      ORG_ID: 705a240f-23f9-4524-86cf-f50f6ccac3a8
+      PORTFOLIO_ID: 326ad65b-8c6b-4353-9a9d-0e09705076c7
+      BASE: https://api.sonarqube.us
+    steps:
+      # ------------------------------------------------------------------
+      # 1. READ: enterprise metadata by key
+      # Expected: 200, JSON with {id, key, name, ...}
+      # ------------------------------------------------------------------
+      - name: "1. GET enterprise by key"
+        run: |
+          echo "--- GET /enterprises/enterprises?enterpriseKey=$ENTERPRISE_KEY ---"
+          curl -s -w "\nHTTP:%{http_code}\n" \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "$BASE/enterprises/enterprises?enterpriseKey=$ENTERPRISE_KEY"
+
+      # ------------------------------------------------------------------
+      # 2. READ: portfolio detail by id (confirmed working previously)
+      # Expected: 200, JSON with {id, name: "test-portfolio", projectCount: 15, ...}
+      # ------------------------------------------------------------------
+      - name: "2. GET portfolio detail"
+        run: |
+          echo "--- GET /enterprises/portfolios/$PORTFOLIO_ID ---"
+          curl -s -w "\nHTTP:%{http_code}\n" \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "$BASE/enterprises/portfolios/$PORTFOLIO_ID"
+
+      # ------------------------------------------------------------------
+      # 3. READ: list portfolios under the enterprise
+      # Expected: 200, JSON array/paged list of portfolios owned by this enterprise
+      # ------------------------------------------------------------------
+      - name: "3. GET list portfolios by enterpriseId"
+        run: |
+          echo "--- GET /enterprises/portfolios?enterpriseId=$ENTERPRISE_ID ---"
+          curl -s -w "\nHTTP:%{http_code}\n" \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "$BASE/enterprises/portfolios?enterpriseId=$ENTERPRISE_ID"
+
+      # ------------------------------------------------------------------
+      # 4. CREATE: attempt to create a new top-level portfolio (manual selection)
+      # Expected: either 201 with new portfolio id, or 400 revealing required fields
+      # Resource is clearly named zzz-demo-cleanup-me for later manual deletion.
+      # ------------------------------------------------------------------
+      - name: "4. POST create portfolio (manual selection)"
+        run: |
+          echo "--- POST /enterprises/portfolios (manual selection) ---"
+          http_code=$(curl -s -o /tmp/create_manual.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"zzz-demo-cleanup-me\",\"description\":\"Created via GitHub Actions API exploration - safe to delete\",\"selection\":\"manual\"}" \
+            "$BASE/enterprises/portfolios")
+          echo "HTTP:$http_code"
+          cat /tmp/create_manual.json
+
+      # ------------------------------------------------------------------
+      # 5. CREATE: attempt to create a portfolio scoped to our org (organizations selection),
+      # mirroring the existing test-portfolio's shape.
+      # Expected: 201 with new portfolio id and projectCount matching org project count
+      # ------------------------------------------------------------------
+      - name: "5. POST create portfolio (organizations selection)"
+        run: |
+          echo "--- POST /enterprises/portfolios (organizations selection) ---"
+          http_code=$(curl -s -o /tmp/create_org.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"zzz-demo-cleanup-me-orgscoped\",\"description\":\"Created via GitHub Actions API exploration - safe to delete\",\"selection\":\"organizations\",\"organizationIds\":[\"$ORG_ID\"]}" \
+            "$BASE/enterprises/portfolios")
+          echo "HTTP:$http_code"
+          cat /tmp/create_org.json
+
+      # ------------------------------------------------------------------
+      # 6. CREATE: attempt a NESTED (child) portfolio under the existing test-portfolio
+      # Expected: 201 with new portfolio id, parentPortfolioId = $PORTFOLIO_ID
+      # ------------------------------------------------------------------
+      - name: "6. POST create nested/child portfolio"
+        run: |
+          echo "--- POST /enterprises/portfolios (nested under test-portfolio) ---"
+          http_code=$(curl -s -o /tmp/create_nested.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"zzz-demo-nested-cleanup-me\",\"description\":\"Nested portfolio - safe to delete\",\"selection\":\"manual\",\"parentPortfolioId\":\"$PORTFOLIO_ID\"}" \
+            "$BASE/enterprises/portfolios")
+          echo "HTTP:$http_code"
+          cat /tmp/create_nested.json
+
+      # ------------------------------------------------------------------
+      # 7. Extract the id created in step 4 (or 5, whichever succeeded) for use below.
+      # ------------------------------------------------------------------
+      - name: "7. Extract created portfolio id"
+        id: extract
+        run: |
+          NEW_ID=$(jq -r '.id // empty' /tmp/create_manual.json 2>/dev/null)
+          if [ -z "$NEW_ID" ]; then
+            NEW_ID=$(jq -r '.id // empty' /tmp/create_org.json 2>/dev/null)
+          fi
+          echo "new_id=$NEW_ID" >> "$GITHUB_OUTPUT"
+          echo "Extracted new portfolio id: $NEW_ID"
+
+      # ------------------------------------------------------------------
+      # 8. ADD PROJECT: attempt to add a demo project to the newly created manual portfolio
+      # Trying REST-nested-collection convention: POST /enterprises/portfolios/{id}/projects
+      # Expected: 200/201 on success, or 404/400 revealing the real endpoint/shape
+      # ------------------------------------------------------------------
+      - name: "8. POST add project to portfolio (nested collection attempt)"
+        if: steps.extract.outputs.new_id != ''
+        run: |
+          NEW_ID="${{ steps.extract.outputs.new_id }}"
+          echo "--- POST /enterprises/portfolios/$NEW_ID/projects ---"
+          curl -s -w "\nHTTP:%{http_code}\n" -X POST \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projectKey\":\"gourabd1ms_java.demo\"}" \
+            "$BASE/enterprises/portfolios/$NEW_ID/projects"
+
+      # ------------------------------------------------------------------
+      # 9. ADD PROJECT (alt): attempt via PATCH on the portfolio resource itself with a projects array
+      # Expected: 200 on success updating projects list, or error revealing correct shape
+      # ------------------------------------------------------------------
+      - name: "9. PATCH add project via portfolio update"
+        if: steps.extract.outputs.new_id != ''
+        run: |
+          NEW_ID="${{ steps.extract.outputs.new_id }}"
+          echo "--- PATCH /enterprises/portfolios/$NEW_ID (projects array) ---"
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projects\":[\"gourabd1ms_java.demo\",\"gourabd1ms_py.demo\"]}" \
+            "$BASE/enterprises/portfolios/$NEW_ID"
+
+      # ------------------------------------------------------------------
+      # 10. READ BACK: re-fetch the created portfolio(s) to see final state
+      # Expected: 200, reflects whatever writes actually succeeded above
+      # ------------------------------------------------------------------
+      - name: "10. GET re-fetch created portfolio(s)"
+        if: steps.extract.outputs.new_id != ''
+        run: |
+          NEW_ID="${{ steps.extract.outputs.new_id }}"
+          echo "--- GET /enterprises/portfolios/$NEW_ID ---"
+          curl -s -w "\nHTTP:%{http_code}\n" \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "$BASE/enterprises/portfolios/$NEW_ID"
+
+      # ------------------------------------------------------------------
+      # 11. Classic v1 API: measures for the portfolio (portfolios are "VW" qualifier components)
+      # Expected: 200 with metric values, or 404/400 if portfolios aren't addressable this way
+      # ------------------------------------------------------------------
+      - name: "11. GET portfolio measures (classic API)"
+        run: |
+          echo "--- GET sonarqube.us/api/measures/component ---"
+          curl -s -w "\nHTTP:%{http_code}\n" \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "https://sonarqube.us/api/measures/component?component=$PORTFOLIO_ID&metricKeys=bugs,vulnerabilities,code_smells,coverage,ncloc"
+
+      # ------------------------------------------------------------------
+      # 12. Classic v1 API: quality gate status for the portfolio
+      # Expected: 200 with quality gate status, or error
+      # ------------------------------------------------------------------
+      - name: "12. GET portfolio quality gate status (classic API)"
+        run: |
+          echo "--- GET sonarqube.us/api/qualitygates/project_status ---"
+          curl -s -w "\nHTTP:%{http_code}\n" \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "https://sonarqube.us/api/qualitygates/project_status?component=$PORTFOLIO_ID"
+
+      # ------------------------------------------------------------------
+      # 13. Classic v1 API: component tree under the portfolio
+      # Expected: 200 with member projects listed, or error
+      # ------------------------------------------------------------------
+      - name: "13. GET portfolio component tree (classic API)"
+        run: |
+          echo "--- GET sonarqube.us/api/components/tree ---"
+          curl -s -w "\nHTTP:%{http_code}\n" \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "https://sonarqube.us/api/components/tree?component=$PORTFOLIO_ID"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Exploration complete. Any portfolio created above is named with a 'zzz-demo' prefix for easy identification and manual deletion later."
