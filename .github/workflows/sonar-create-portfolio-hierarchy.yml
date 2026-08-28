@@ -5,22 +5,33 @@
 # This talks to Sonar's newer Enterprise REST API (host: api.sonarqube.us,
 # everything hangs off /enterprises/...), NOT the classic on-prem
 # `api/views/*` Web API. That API is still being reverse-engineered (see
-# sonar-diag.yml) - only a handful of endpoints are confirmed to work:
-#   - GET   /enterprises/enterprises/{id}      (200)
-#   - GET   /enterprises/portfolios/{id}       (200)
-#   - PATCH /enterprises/portfolios/{id}       (200, but the correct field
-#             name/shape for attaching projects was NOT confirmed by prior
-#             probing - key/project/projectKey all returned HTTP 200 while
-#             silently leaving projectCount at 0)
+# sonar-diag.yml) - confirmed behavior so far:
+#   - GET  /enterprises/enterprises/{id}                  -> 200
+#   - GET  /enterprises/portfolios/{id}                   -> 200
+#   - POST /enterprises/portfolios                        -> 200, creates a
+#           root-level portfolio (enterpriseId, name, description, selection)
+#   - POST /enterprises/portfolios with "parentPortfolioId" in the body
+#           -> 404 {"message":"Portfolio Hierarchy is not yet implemented."}
+#           i.e. nesting a child AT CREATE TIME is explicitly unsupported.
 #   - Bare collection endpoints (`/enterprises`, `/enterprises/organizations`,
 #     `/enterprises/projects`) are blocked by a gateway in front of the API
 #     and return HTTP 403 regardless of token validity.
+#   - Classic project listing works from the sonarqube.us host instead:
+#     GET https://sonarqube.us/api/components/search_projects?organization=...
 #
-# Because of that, steps 1 and 5/6 below try several candidate request
-# shapes in sequence and print the raw response + HTTP code for each one,
-# so a human can see from the Action log which shape actually worked.
-# Once confirmed, this file should be trimmed down to just the winning
-# candidate.
+# Since "Portfolio Hierarchy" is not implemented via create, step 4 below
+# tests the one remaining plausible mechanism: the portfolio schema already
+# exposes an (empty) "children" array on GET, so we try PATCHing that array
+# onto the PARENT (rather than setting parentPortfolioId on the child) to
+# see if that's how nesting is actually wired up. If neither this nor the
+# create-time attempt works, this workflow still produces 3 independent
+# portfolios (parent, child1, child2) with projects split across child1/
+# child2 - real nesting would then need to be done by hand in the Sonar UI,
+# or wait for Sonar to ship the feature.
+#
+# Step 6 (project assignment) similarly tries multiple candidate PATCH
+# payload shapes and reports which one actually raised projectCount above 0,
+# since that field name isn't documented either.
 # ============================================================================
 name: Sonar Create Portfolio Hierarchy
 
@@ -39,53 +50,31 @@ jobs:
     steps:
 
       # ----------------------------------------------------------------
-      # 1. Discover demo project keys in the org.
-      #    The Enterprise API's bare "/enterprises/projects" collection
-      #    endpoint is blocked (see header comment), so we fall back to
-      #    the classic project-listing endpoints on the sonarqube.us host,
-      #    trying a couple of shapes and taking whichever responds with a
-      #    non-empty project/component list.
+      # 1. Discover demo project keys in the org via the classic
+      #    project-listing endpoint on the sonarqube.us host (confirmed
+      #    working - the Enterprise API's own project-listing endpoints
+      #    are blocked, see header comment).
       # ----------------------------------------------------------------
       - name: "1. Discover demo project keys"
         id: discover
         run: |
           set +e
-          echo "--- candidate A: /enterprises/organizations/$ORG_ID/projects ---"
-          RESP_A=$(curl -s -w "\nHTTP:%{http_code}" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
-            "$BASE/enterprises/organizations/$ORG_ID/projects")
-          echo "$RESP_A"
-
-          echo "--- candidate B: sonarqube.us/api/components/search_projects ---"
-          RESP_B=$(curl -s -w "\nHTTP:%{http_code}" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+          echo "--- GET sonarqube.us/api/components/search_projects ---"
+          RESP=$(curl -s -w "\nHTTP:%{http_code}" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
             "https://sonarqube.us/api/components/search_projects?organization=$ORG_KEY&ps=500")
-          echo "$RESP_B"
+          echo "$RESP"
+          KEYS=$(echo "${RESP%$'\n'HTTP:*}" | jq -r '.components[]?.key' 2>/dev/null)
 
-          echo "--- candidate C: sonarqube.us/api/projects/search ---"
-          RESP_C=$(curl -s -w "\nHTTP:%{http_code}" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
-            "https://sonarqube.us/api/projects/search?organization=$ORG_KEY&ps=500")
-          echo "$RESP_C"
-
-          # Pull whichever candidate returned a real, non-empty list of project keys.
-          KEYS=$(echo "${RESP_A%$'\n'HTTP:*}" | jq -r '[.[]?.key // .[]?.projectKey] | map(select(. != null)) | .[]' 2>/dev/null)
+          # Last-resort fallback in case discovery ever breaks. EDIT this
+          # list if you know the real demo project keys and discovery fails.
           if [ -z "$KEYS" ]; then
-            KEYS=$(echo "${RESP_B%$'\n'HTTP:*}" | jq -r '.components[]?.key' 2>/dev/null)
-          fi
-          if [ -z "$KEYS" ]; then
-            KEYS=$(echo "${RESP_C%$'\n'HTTP:*}" | jq -r '.projects[]?.key' 2>/dev/null)
-          fi
-
-          # Last-resort fallback: the one demo project key already known to
-          # exist from sonar-diag.yml. EDIT this list if discovery above
-          # fails and you know the real demo project keys.
-          if [ -z "$KEYS" ]; then
-            echo "::warning::Could not discover project keys from any candidate endpoint - falling back to a hardcoded single demo project. Edit the fallback list in this step once you know the real keys."
+            echo "::warning::Could not discover project keys - falling back to a hardcoded single demo project."
             KEYS="gourabd1ms_java.demo"
           fi
 
           echo "Discovered project keys:"
           echo "$KEYS"
 
-          # Save as a JSON array on one line for later steps.
           JSON_KEYS=$(printf '%s\n' "$KEYS" | jq -R . | jq -s -c .)
           echo "project_keys=$JSON_KEYS" >> "$GITHUB_OUTPUT"
 
@@ -101,24 +90,24 @@ jobs:
             -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"parent\",\"description\":\"Parent portfolio - auto-created by GitHub Action\",\"selection\":\"projects\"}" \
             "$BASE/enterprises/portfolios")
           echo "$RESP"
-          BODY="${RESP%$'\n'HTTP:*}"
-          PARENT_ID=$(echo "$BODY" | jq -r '.id')
+          PARENT_ID=$(echo "${RESP%$'\n'HTTP:*}" | jq -r '.id')
           echo "Parent portfolio id: $PARENT_ID"
           echo "id=$PARENT_ID" >> "$GITHUB_OUTPUT"
 
       # ----------------------------------------------------------------
-      # 3. Create the two child sub-portfolios ("child1", "child2"),
-      #    nested under the parent via parentPortfolioId.
+      # 3. Create child1 and child2 as their own portfolios. NOTE: we do
+      #    NOT pass parentPortfolioId here - the API rejects that at
+      #    create time with "Portfolio Hierarchy is not yet implemented"
+      #    (confirmed by direct testing). Nesting is attempted separately
+      #    in step 4.
       # ----------------------------------------------------------------
-      - name: "3. Create child1 and child2 sub-portfolios"
+      - name: "3. Create child1 and child2 portfolios"
         id: children
         run: |
-          PARENT_ID="${{ steps.parent.outputs.id }}"
-
           echo "--- POST /enterprises/portfolios (child1) ---"
           RESP1=$(curl -s -w "\nHTTP:%{http_code}" -X POST \
             -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"child1\",\"description\":\"Child portfolio 1 - auto-created by GitHub Action\",\"selection\":\"projects\",\"parentPortfolioId\":\"$PARENT_ID\"}" \
+            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"child1\",\"description\":\"Child portfolio 1 - auto-created by GitHub Action\",\"selection\":\"projects\"}" \
             "$BASE/enterprises/portfolios")
           echo "$RESP1"
           CHILD1_ID=$(echo "${RESP1%$'\n'HTTP:*}" | jq -r '.id')
@@ -127,7 +116,7 @@ jobs:
           echo "--- POST /enterprises/portfolios (child2) ---"
           RESP2=$(curl -s -w "\nHTTP:%{http_code}" -X POST \
             -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"child2\",\"description\":\"Child portfolio 2 - auto-created by GitHub Action\",\"selection\":\"projects\",\"parentPortfolioId\":\"$PARENT_ID\"}" \
+            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"child2\",\"description\":\"Child portfolio 2 - auto-created by GitHub Action\",\"selection\":\"projects\"}" \
             "$BASE/enterprises/portfolios")
           echo "$RESP2"
           CHILD2_ID=$(echo "${RESP2%$'\n'HTTP:*}" | jq -r '.id')
@@ -137,33 +126,28 @@ jobs:
           echo "child2_id=$CHILD2_ID" >> "$GITHUB_OUTPUT"
 
       # ----------------------------------------------------------------
-      # 4. Verify child1/child2 actually got nested under parent. If the
-      #    "parentPortfolioId" passed at create time didn't take effect,
-      #    fall back to PATCHing it onto each child after the fact.
+      # 4. Attempt nesting from the PARENT side: GET already shows an
+      #    (empty) "children" array on every portfolio, so try PATCHing
+      #    that array with [child1_id, child2_id] instead of setting
+      #    parentPortfolioId on the children. Print the result either way
+      #    - if this also fails, parent/child1/child2 remain independent
+      #    portfolios and the hierarchy needs to be built by hand in the
+      #    Sonar UI (or once Sonar ships the feature).
       # ----------------------------------------------------------------
-      - name: "4. Verify nesting (fallback: PATCH parentPortfolioId)"
+      - name: "4. Attempt nesting via parent.children"
         run: |
           PARENT_ID="${{ steps.parent.outputs.id }}"
           CHILD1_ID="${{ steps.children.outputs.child1_id }}"
           CHILD2_ID="${{ steps.children.outputs.child2_id }}"
 
-          echo "--- GET parent portfolio ---"
-          PARENT_BODY=$(curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PARENT_ID")
-          echo "$PARENT_BODY"
-          CHILD_COUNT=$(echo "$PARENT_BODY" | jq '.children | length' 2>/dev/null)
+          echo "--- PATCH /enterprises/portfolios/$PARENT_ID (children:[child1,child2]) ---"
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"children\":[\"$CHILD1_ID\",\"$CHILD2_ID\"]}" \
+            "$BASE/enterprises/portfolios/$PARENT_ID"
 
-          if [ "$CHILD_COUNT" = "0" ] || [ -z "$CHILD_COUNT" ]; then
-            echo "::warning::parent.children is empty after create - retrying nesting via PATCH parentPortfolioId on each child."
-            for CID in "$CHILD1_ID" "$CHILD2_ID"; do
-              echo "--- PATCH /enterprises/portfolios/$CID (parentPortfolioId) ---"
-              curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
-                -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-                -d "{\"parentPortfolioId\":\"$PARENT_ID\"}" \
-                "$BASE/enterprises/portfolios/$CID"
-            done
-            echo "--- GET parent portfolio (re-check) ---"
-            curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PARENT_ID"
-          fi
+          echo "--- GET parent portfolio (re-check nesting) ---"
+          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PARENT_ID" | jq .
 
       # ----------------------------------------------------------------
       # 5. Split the discovered demo projects in half: first half -> child1,
@@ -187,10 +171,10 @@ jobs:
 
       # ----------------------------------------------------------------
       # 6. Assign each half to its portfolio. The correct PATCH field name
-      #    for attaching projects hasn't been confirmed yet (see header
-      #    comment), so try a few candidate shapes per portfolio, checking
-      #    projectCount in the response after each try, and stop at the
-      #    first one that actually attaches something.
+      #    for attaching projects isn't documented, so try a few candidate
+      #    shapes per portfolio, checking projectCount in the response
+      #    after each try, and stop at the first one that actually
+      #    attaches something.
       # ----------------------------------------------------------------
       - name: "6. Assign projects to child1 and child2"
         run: |
@@ -231,8 +215,19 @@ jobs:
             COUNT=$(echo "${RESP%$'\n'HTTP:*}" | jq -r '.projectCount // 0')
             [ "$COUNT" != "0" ] && [ -n "$COUNT" ] && { echo "$LABEL: candidate 3 worked (projectCount=$COUNT)"; return; }
 
-            # Candidate 4: per-project POST to a /projects sub-resource.
-            echo "--- candidate 4: POST /enterprises/portfolios/$PORTFOLIO_ID/projects per project ---"
+            # Candidate 4: projectKeys field.
+            echo "--- candidate 4: {\"projectKeys\":[...]} ---"
+            RESP=$(curl -s -w "\nHTTP:%{http_code}" -X PATCH \
+              -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+              -d "{\"projectKeys\":$PROJECTS_JSON}" \
+              "$BASE/enterprises/portfolios/$PORTFOLIO_ID")
+            echo "$RESP"
+            COUNT=$(echo "${RESP%$'\n'HTTP:*}" | jq -r '.projectCount // 0')
+            [ "$COUNT" != "0" ] && [ -n "$COUNT" ] && { echo "$LABEL: candidate 4 worked (projectCount=$COUNT)"; return; }
+
+            # Candidate 5: per-project POST to a /projects sub-resource
+            # (only meaningful if the portfolio id itself is valid).
+            echo "--- candidate 5: POST /enterprises/portfolios/$PORTFOLIO_ID/projects per project ---"
             for KEY in $(echo "$PROJECTS_JSON" | jq -r '.[]'); do
               curl -s -w "\nHTTP:%{http_code}\n" -X POST \
                 -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
@@ -247,8 +242,8 @@ jobs:
           assign_projects "${{ steps.children.outputs.child2_id }}" '${{ steps.split.outputs.child2_projects }}' "child2"
 
       # ----------------------------------------------------------------
-      # 7. Final verification: print the full hierarchy so it's easy to
-      #    confirm parent -> child1/child2 -> assigned projects.
+      # 7. Final verification: print the full state of all 3 portfolios so
+      #    it's easy to confirm what actually got created/assigned/nested.
       # ----------------------------------------------------------------
       - name: "7. Final verification"
         run: |
@@ -266,3 +261,5 @@ jobs:
           curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$CHILD2_ID" | jq .
 
           echo "Parent portfolio URL: https://sonarqube.us/enterprise/morganstanley/portfolios/$PARENT_ID"
+          echo "child1 portfolio URL: https://sonarqube.us/enterprise/morganstanley/portfolios/$CHILD1_ID"
+          echo "child2 portfolio URL: https://sonarqube.us/enterprise/morganstanley/portfolios/$CHILD2_ID"
