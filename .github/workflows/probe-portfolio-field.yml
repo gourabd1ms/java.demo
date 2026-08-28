@@ -1,10 +1,5 @@
-# Throwaway diagnostic workflow - probes PortfolioProjectRequest field names
-# by sending a deliberately wrong-typed value for each candidate field name.
-# Jackson silently ignores *unknown* fields (confirmed - see sonar-diag.yml
-# and sonar-create-portfolio-hierarchy.yml history) but throws a type-mismatch
-# error naming the field if it IS a real field on the DTO. So: whichever
-# candidate's response error mentions that same field name is the real one.
-# Safe to delete once the real field name is found.
+# Throwaway diagnostic workflow (round 2). Safe to delete once the real
+# project-assignment mechanism is found.
 name: Probe Portfolio Project Field
 on:
   workflow_dispatch:
@@ -15,13 +10,59 @@ jobs:
       SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
       BASE: https://api.sonarqube.us
       TARGET_PORTFOLIO: afdd07ac-c27c-4531-984a-2ebadead6101
+      PROJECT_KEY: gourabd1ms_java.demo
     steps:
-      - name: Probe candidate field names
+      - name: A. Look for exposed OpenAPI/Swagger docs
         run: |
-          for FIELD in key project projectKey id componentKey component projectId name projectUuid uuid projectID projectid; do
-            echo "=== candidate field: $FIELD ==="
-            curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
-              -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-              -d "{\"projects\":[{\"$FIELD\":{\"nested\":1}}]}" \
-              "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO"
+          for PATH in "/v3/api-docs" "/api-docs" "/swagger.json" "/openapi.json" "/enterprises/v3/api-docs" "/v2/api-docs" "/swagger-ui/index.html"; do
+            echo "=== GET $BASE$PATH ==="
+            curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE$PATH" | head -c 800
+            echo
           done
+
+      - name: B. Nested project object
+        run: |
+          echo "=== nested {project:{key:...}} ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projects\":[{\"project\":{\"key\":\"$PROJECT_KEY\"}}]}" \
+            "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO"
+
+      - name: C. projectKey + organizationKey
+        run: |
+          echo "=== {projectKey, organizationKey} ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projects\":[{\"projectKey\":\"$PROJECT_KEY\",\"organizationKey\":\"gourabd1ms\"}]}" \
+            "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO"
+
+      - name: D. PUT path-based sub-resource (ends in project key, not a bare collection)
+        run: |
+          echo "=== PUT /enterprises/portfolios/{id}/projects/{projectKey} ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -X PUT \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO/projects/$PROJECT_KEY"
+
+      - name: E. POST path-based sub-resource
+        run: |
+          echo "=== POST /enterprises/portfolios/{id}/projects/{projectKey} ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -X POST \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO/projects/$PROJECT_KEY"
+
+      - name: F. Top-level addProjects / projectKeysToAdd on the portfolio PATCH
+        run: |
+          echo "=== {addProjects:[key]} ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"addProjects\":[\"$PROJECT_KEY\"]}" \
+            "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO"
+          echo "=== {projectKeysToAdd:[key]} ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projectKeysToAdd\":[\"$PROJECT_KEY\"]}" \
+            "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO"
+
+      - name: G. Re-fetch target portfolio to see final state
+        run: |
+          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$TARGET_PORTFOLIO" | jq .
