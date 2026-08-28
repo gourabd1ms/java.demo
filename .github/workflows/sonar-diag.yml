@@ -10,6 +10,6 @@ jobs:
           ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
         run: |
           curl -s -w "\nHTTP:%{http_code}\n" -X GET \
-            "https://api.sonarqube.us/enterprises/enterprises?enterpriseKey=gourabd1ms" \
+            "https://api.sonarqube.us/enterprises/enterprises?enterpriseKey=morganstanley" \
             -H "accept: application/json" \
             -H "Authorization: Bearer $ENT_TOKEN"
