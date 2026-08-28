@@ -5,24 +5,31 @@ jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
-      - name: Probe v2 root and docs html
+      - name: Probe v2 candidate groups
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
-          echo "=== v2 root ==="
-          curl -sL -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2"
-          echo "=== v2 root trailing slash ==="
-          curl -sL -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/"
-          echo "=== fetch landing page html ==="
-          curl -sL "https://api-docs.sonarsource.com/sonarqube-cloud/default/landing" -o /tmp/landing.html
-          wc -c /tmp/landing.html
-          python3 -c "
-          import re
-          html = open('/tmp/landing.html', errors='ignore').read()
-          urls = set(re.findall(r'[\"\'](https?://[^\"\']+\.(?:json|yaml|yml))[\"\']', html))
-          for u in urls:
-              print('SPEC_URL:', u)
-          urls2 = set(re.findall(r'[\"\'](/[^\"\']*(?:openapi|spec)[^\"\']*)[\"\']', html, re.I))
-          for u in urls2:
-              print('REL_SPEC_PATH:', u)
-          "
+          echo "=== probing candidate v2 groups ==="
+          echo -n "dop-translation: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/dop-translation"; cat /tmp/r.json; echo
+          echo -n "devops-platform: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/devops-platform"; cat /tmp/r.json; echo
+          echo -n "devops-platforms: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/devops-platforms"; cat /tmp/r.json; echo
+          echo -n "github-integration: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/github-integration"; cat /tmp/r.json; echo
+          echo -n "project-bindings: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/project-bindings"; cat /tmp/r.json; echo
+          echo -n "project-management: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/project-management"; cat /tmp/r.json; echo
+          echo -n "projects-management: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/projects-management"; cat /tmp/r.json; echo
+          echo -n "analysis: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/analysis"; cat /tmp/r.json; echo
+          echo -n "clean-code-policy: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/clean-code-policy"; cat /tmp/r.json; echo
+          echo -n "authorizations: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/authorizations"; cat /tmp/r.json; echo
+          echo -n "users-management: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/users-management"; cat /tmp/r.json; echo
+          echo -n "system: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/system"; cat /tmp/r.json; echo
+          echo -n "sca: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/sca"; cat /tmp/r.json; echo
+          echo -n "fix-suggestions: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/fix-suggestions"; cat /tmp/r.json; echo
+          echo -n "notifications: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/notifications"; cat /tmp/r.json; echo
+          echo -n "editions: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/editions"; cat /tmp/r.json; echo
+          echo -n "settings: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/settings"; cat /tmp/r.json; echo
+          echo -n "mode: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/mode"; cat /tmp/r.json; echo
+          echo -n "project-analyses: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/project-analyses"; cat /tmp/r.json; echo
+          echo -n "ai-codefix: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/ai-codefix"; cat /tmp/r.json; echo
+          echo -n "issues: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/issues"; cat /tmp/r.json; echo
+          echo -n "rules: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/rules"; cat /tmp/r.json; echo
+          echo -n "measures: "; curl -s -o /tmp/r.json -w "HTTP %{http_code} " -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/measures"; cat /tmp/r.json; echo
