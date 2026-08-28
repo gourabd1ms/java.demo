@@ -14,9 +14,9 @@ jobs:
     steps:
       - name: A. Look for exposed OpenAPI/Swagger docs
         run: |
-          for PATH in "/v3/api-docs" "/api-docs" "/swagger.json" "/openapi.json" "/enterprises/v3/api-docs" "/v2/api-docs" "/swagger-ui/index.html"; do
-            echo "=== GET $BASE$PATH ==="
-            curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE$PATH" | head -c 800
+          for DOC_PATH in "/v3/api-docs" "/api-docs" "/swagger.json" "/openapi.json" "/enterprises/v3/api-docs" "/v2/api-docs" "/swagger-ui/index.html"; do
+            echo "=== GET $BASE$DOC_PATH ==="
+            curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE$DOC_PATH" | head -c 800
             echo
           done
 
