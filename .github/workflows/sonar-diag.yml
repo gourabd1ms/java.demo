@@ -5,29 +5,24 @@ jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
-      - name: Probe v2 API
+      - name: Probe v2 root and docs html
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
-          echo "=== bound-projects list ==="
-          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/dop-translation/bound-projects"
-          echo "=== dop-translation github configurations ==="
-          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/dop-translation/github-configurations"
-          echo "=== bound projects filter by project java.demo ==="
-          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/dop-translation/bound-projects?projectKey=gourabd1ms_java.demo"
-          echo "=== api-docs openapi spec probe ==="
-          curl -s -o /tmp/openapi.json -w "\nHTTP:%{http_code}\n" "https://api-docs.sonarsource.com/sonarqube-cloud/default/openapi.json"
-          echo "size:"
-          wc -c /tmp/openapi.json
-          echo "=== grep dop-translation and analysis paths from spec if present ==="
+          echo "=== v2 root ==="
+          curl -sL -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2"
+          echo "=== v2 root trailing slash ==="
+          curl -sL -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_TOKEN" "https://sonarqube.us/api/v2/"
+          echo "=== fetch landing page html ==="
+          curl -sL "https://api-docs.sonarsource.com/sonarqube-cloud/default/landing" -o /tmp/landing.html
+          wc -c /tmp/landing.html
           python3 -c "
-          import json
-          try:
-              d = json.load(open('/tmp/openapi.json'))
-              paths = list(d.get('paths', {}).keys())
-              for p in paths:
-                  if 'dop' in p.lower() or 'analysis' in p.lower() or 'bound' in p.lower() or 'automatic' in p.lower():
-                      print(p)
-          except Exception as e:
-              print('parse error', e)
+          import re
+          html = open('/tmp/landing.html', errors='ignore').read()
+          urls = set(re.findall(r'[\"\'](https?://[^\"\']+\.(?:json|yaml|yml))[\"\']', html))
+          for u in urls:
+              print('SPEC_URL:', u)
+          urls2 = set(re.findall(r'[\"\'](/[^\"\']*(?:openapi|spec)[^\"\']*)[\"\']', html, re.I))
+          for u in urls2:
+              print('REL_SPEC_PATH:', u)
           "
