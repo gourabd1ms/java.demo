@@ -5,25 +5,27 @@ jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
-      - name: Probe swaggerhub spec by exact name
+      - name: Fetch and parse the real portfolios spec
         run: |
-          echo "trying https://api.swaggerhub.com/apis/sonarsource/public-sonarcloud-organizations-enterprises-external/1.0.1"
-          curl -s -o /tmp/spec.json -w "HTTP:%{http_code}\n" "https://api.swaggerhub.com/apis/sonarsource/public-sonarcloud-organizations-enterprises-external/1.0.1"
-          head -c 300 /tmp/spec.json; echo
-          echo "trying https://api.swaggerhub.com/apis/SonarSource/public-sonarcloud-organizations-enterprises-external/1.0.1"
-          curl -s -o /tmp/spec.json -w "HTTP:%{http_code}\n" "https://api.swaggerhub.com/apis/SonarSource/public-sonarcloud-organizations-enterprises-external/1.0.1"
-          head -c 300 /tmp/spec.json; echo
-          echo "trying https://api.swaggerhub.com/apis/sonarqube/public-sonarcloud-organizations-enterprises-external/1.0.1"
-          curl -s -o /tmp/spec.json -w "HTTP:%{http_code}\n" "https://api.swaggerhub.com/apis/sonarqube/public-sonarcloud-organizations-enterprises-external/1.0.1"
-          head -c 300 /tmp/spec.json; echo
-          echo "trying https://api.swaggerhub.com/apis/sonar-source/public-sonarcloud-organizations-enterprises-external/1.0.1"
-          curl -s -o /tmp/spec.json -w "HTTP:%{http_code}\n" "https://api.swaggerhub.com/apis/sonar-source/public-sonarcloud-organizations-enterprises-external/1.0.1"
-          head -c 300 /tmp/spec.json; echo
-          echo "trying https://api.swaggerhub.com/apis/sonarcloud/public-sonarcloud-organizations-enterprises-external/1.0.1"
-          curl -s -o /tmp/spec.json -w "HTTP:%{http_code}\n" "https://api.swaggerhub.com/apis/sonarcloud/public-sonarcloud-organizations-enterprises-external/1.0.1"
-          head -c 300 /tmp/spec.json; echo
-          echo "=== fetch the actual docs page for embedded spec refs ==="
-          curl -sL "https://api-docs.sonarsource.com/sonarqube-cloud/default/public-sonarcloud-organizations-enterprises-external-1-0-1" -o /tmp/page.html
-          wc -c /tmp/page.html
-          grep -o "https://api.swaggerhub.com/apis[^\"]*" /tmp/page.html | sort -u || true
-          grep -o "apis/[a-zA-Z0-9_.-]*/[a-zA-Z0-9_.-]*/[0-9.]*" /tmp/page.html | sort -u || true
+          curl -s -o /tmp/spec.json -w "HTTP:%{http_code}\n" "https://api.swaggerhub.com/apis/SonarSource/PUBLIC-sonarcloud-organizations-enterprises-external/1.0.1/swagger.json"
+          wc -c /tmp/spec.json
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/spec.json'))
+          for path, methods in d.get('paths', {}).items():
+              if 'portfolio' in path.lower():
+                  for verb, op in methods.items():
+                      print('=====', verb.upper(), path, '=====')
+                      print('summary:', op.get('summary'))
+                      print('operationId:', op.get('operationId'))
+                      params = op.get('parameters', [])
+                      for p in params:
+                          print('  param:', p.get('name'), p.get('in'), 'required=' + str(p.get('required')))
+                      rb = op.get('requestBody')
+                      if rb:
+                          try:
+                              schema = rb['content']['application/json']['schema']
+                              print('  requestBody schema:', json.dumps(schema)[:1500])
+                          except Exception as e:
+                              print('  requestBody parse error', e)
+          "
