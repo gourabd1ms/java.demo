@@ -5,13 +5,15 @@ jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
-      - name: Debug swaggerhub fetch
+      - name: Search portal.swaggerhub.com refs
         run: |
-          echo "--- attempt 1: swagger.json ---"
-          curl -s -w "\nHTTP:%{http_code}\n" "https://api.swaggerhub.com/apis/SonarSource/PUBLIC-sonarcloud-organizations-enterprises-external/1.0.1/swagger.json"
-          echo "--- attempt 2: no suffix ---"
-          curl -s -w "\nHTTP:%{http_code}\n" "https://api.swaggerhub.com/apis/SonarSource/PUBLIC-sonarcloud-organizations-enterprises-external/1.0.1"
-          echo "--- attempt 3: resolved (follow redirects) ---"
-          curl -sL -w "\nHTTP:%{http_code}\n" "https://api.swaggerhub.com/apis/SonarSource/PUBLIC-sonarcloud-organizations-enterprises-external/1.0.1/swagger.json"
-          echo "--- attempt 4: -v verbose on attempt 1 ---"
-          curl -v "https://api.swaggerhub.com/apis/SonarSource/PUBLIC-sonarcloud-organizations-enterprises-external/1.0.1/swagger.json" 2>&1 | tail -30
+          curl -sL "https://api-docs.sonarsource.com/sonarqube-cloud/default/public-sonarcloud-organizations-enterprises-external-1-0-1" -o /tmp/page.html
+          wc -c /tmp/page.html
+          grep -o "portal.swaggerhub.com/[a-zA-Z0-9_./-]*" /tmp/page.html | sort -u
+          echo "--- try portal domain definition fetch ---"
+          curl -s -w "\nHTTP:%{http_code}\n" "https://portal.swaggerhub.com/services/api/apis/SonarSource/PUBLIC-sonarcloud-organizations-enterprises-external/1.0.1"
+          echo "--- try sonarsource org slug on portal ---"
+          curl -s -w "\nHTTP:%{http_code}\n" "https://api-docs.sonarsource.com/services/api/apis/SonarSource/PUBLIC-sonarcloud-organizations-enterprises-external/1.0.1" | head -c 1000
+          echo
+          echo "--- generic portal apis list for this docs site ---"
+          curl -s -w "\nHTTP:%{http_code}\n" "https://api-docs.sonarsource.com/services/api/apis" | head -c 2000
