@@ -1,10 +1,11 @@
-# Throwaway diagnostic workflow (round 10). Safe to delete afterward.
-# New hypothesis: "projects" is only mutable while the portfolio is a
-# draft (isDraft: true / draftStage < some value) - matching the wizard-
-# like UI flow (create -> pick org -> pick projects -> publish). Every
-# portfolio we've made so far defaulted to isDraft: false and every PATCH
-# attempt against those was a silent no-op regardless of payload shape.
-name: Probe Portfolio Draft Hypothesis Round 10
+# Throwaway diagnostic workflow (round 11). Safe to delete afterward.
+# Captured from real browser traffic: the UI calls
+# PATCH /enterprises/portfolios/{id}?simulate=false when actually
+# committing a change. Every prior PATCH we sent omitted "simulate"
+# entirely - almost certainly defaulting to a dry-run/preview mode, which
+# would explain every single silent no-op so far regardless of payload
+# shape.
+name: Probe Simulate Param Round 11
 on:
   workflow_dispatch:
 jobs:
@@ -13,54 +14,25 @@ jobs:
     env:
       SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
       BASE: https://api.sonarqube.us
-      ENTERPRISE_ID: 896d0782-65b7-4d6f-ac7c-29d00e2ec684
       ORG_ID: 705a240f-23f9-4524-86cf-f50f6ccac3a8
+      PORTFOLIO_ID: afbfc049-155d-4f6c-922e-a08294821ca9
       C_DEMO_UUID: 7c533ad0-f769-4e2b-a552-01f110de067c
       CPP_DEMO_UUID: 536b2816-d7ff-493f-9546-e204769fc822
       JAVA_DEMO_UUID: 6aefd5a1-006c-4425-91ab-bc4a22a509e8
     steps:
-      - name: "1. Create portfolio explicitly as a draft"
-        id: portfolio
+      - name: "1. PATCH with ?simulate=false and documented {branchId} shape"
         run: |
-          RESP=$(curl -s -w "\nHTTP:%{http_code}" -X POST \
-            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"zzz-probe10-cleanup-me\",\"description\":\"safe to delete\",\"selection\":\"projects\",\"isDraft\":true,\"draftStage\":0}" \
-            "$BASE/enterprises/portfolios")
-          echo "$RESP"
-          PID=$(echo "${RESP%$'\n'HTTP:*}" | jq -r '.id')
-          echo "portfolio id: $PID"
-          echo "id=$PID" >> "$GITHUB_OUTPUT"
-
-      - name: "2. PATCH organizationIds while still draft"
-        run: |
-          PID="${{ steps.portfolio.outputs.id }}"
-          echo "=== PATCH {organizationIds, isDraft:true, draftStage:1} ==="
+          echo "=== PATCH .../portfolios/$PORTFOLIO_ID?simulate=false ==="
           curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
             -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"organizationIds\":[\"$ORG_ID\"],\"isDraft\":true,\"draftStage\":1}" \
-            "$BASE/enterprises/portfolios/$PID"
+            -d "{\"projects\":[{\"branchId\":\"$C_DEMO_UUID\"},{\"branchId\":\"$CPP_DEMO_UUID\"},{\"branchId\":\"$JAVA_DEMO_UUID\"}]}" \
+            "$BASE/enterprises/portfolios/$PORTFOLIO_ID?simulate=false"
 
-      - name: "3. PATCH projects while still draft"
+      - name: "2. Verify via GET /enterprises/portfolios/{id}"
         run: |
-          PID="${{ steps.portfolio.outputs.id }}"
-          echo "=== PATCH {projects:[{branchId,id}], isDraft:true, draftStage:2} ==="
-          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
-            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"projects\":[{\"branchId\":\"$C_DEMO_UUID\",\"id\":\"$C_DEMO_UUID\"},{\"branchId\":\"$CPP_DEMO_UUID\",\"id\":\"$CPP_DEMO_UUID\"},{\"branchId\":\"$JAVA_DEMO_UUID\",\"id\":\"$JAVA_DEMO_UUID\"}],\"isDraft\":true,\"draftStage\":2}" \
-            "$BASE/enterprises/portfolios/$PID"
+          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PORTFOLIO_ID" | jq .
 
-      - name: "4. Verify while still draft"
+      - name: "3. Verify via GET /enterprises/portfolio-projects (real read model)"
         run: |
-          PID="${{ steps.portfolio.outputs.id }}"
-          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PID" | jq .
-
-      - name: "5. Publish (isDraft: false) and verify projects survive"
-        run: |
-          PID="${{ steps.portfolio.outputs.id }}"
-          echo "=== PATCH {isDraft:false} ==="
-          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
-            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"isDraft\":false}" \
-            "$BASE/enterprises/portfolios/$PID"
-          echo "=== final GET ==="
-          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PID" | jq .
+          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "$BASE/enterprises/portfolio-projects?portfolioId=$PORTFOLIO_ID&organizationId=$ORG_ID&q=&pageIndex=1" | jq '[.projects[] | select(.isSelected==true)]'
