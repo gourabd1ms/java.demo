@@ -1,0 +1,111 @@
+# ============================================================================
+# Sonar: create a new portfolio and assign 3 specific demo projects to it
+# (c.demo, cpp.demo, java.demo) - a fixed hand-picked list, unlike
+# sonar-create-portfolio-hierarchy.yml which dynamically discovers and
+# splits ALL demo projects.
+#
+# Talks to Sonar's Enterprise REST API (host: api.sonarqube.us, everything
+# hangs off /enterprises/...). See sonar-create-portfolio-hierarchy.yml's
+# header comment for the full list of confirmed API behavior. Relevant here:
+#
+#   - POST  /enterprises/portfolios       -> 200, creates a root portfolio.
+#   - PATCH /enterprises/portfolios/{id}?simulate=false -> 200, and IS
+#     CONFIRMED WORKING for project assignment (reverse-engineered from a
+#     real browser HAR capture, not guesswork). The body must include BOTH
+#     "selection":"projects" AND "projects":[{"branchId": "<uuid>"}, ...]
+#     in the SAME request - every earlier attempt failed because it either
+#     omitted "selection" from that call, used the wrong key inside the
+#     array items (key/projectKey/id/componentKey/...), or split
+#     org/project assignment across two separate PATCH calls.
+#   - "branchId" is a project-BRANCH uuid, not the project key, so step 2
+#     first resolves each key in SELECTED_PROJECT_KEYS to its branchId via
+#     GET /enterprises/portfolio-projects (the same read-model endpoint
+#     Sonar's own UI project picker uses) before building the PATCH body.
+# ============================================================================
+name: Sonar Assign Selected Projects To New Portfolio
+
+on:
+  workflow_dispatch:
+
+jobs:
+  assign-selected-projects:
+    runs-on: ubuntu-latest
+    env:
+      SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
+      BASE: https://api.sonarqube.us
+      ENTERPRISE_ID: 896d0782-65b7-4d6f-ac7c-29d00e2ec684
+      ORG_ID: 705a240f-23f9-4524-86cf-f50f6ccac3a8
+      # The 3 hand-picked demo projects to assign - edit this list to
+      # change which projects get assigned.
+      SELECTED_PROJECT_KEYS: >-
+        ["gourabd1ms_c.demo","gourabd1ms_cpp.demo","gourabd1ms_java.demo"]
+    steps:
+
+      # ----------------------------------------------------------------
+      # 1. Create the new portfolio.
+      # ----------------------------------------------------------------
+      - name: "1. Create portfolio"
+        id: portfolio
+        run: |
+          echo "--- POST /enterprises/portfolios ---"
+          RESP=$(curl -s -w "\nHTTP:%{http_code}" -X POST \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"selected-demo-projects\",\"description\":\"Holds c.demo, cpp.demo and java.demo - auto-created by GitHub Action\",\"selection\":\"projects\"}" \
+            "$BASE/enterprises/portfolios")
+          echo "$RESP"
+          PORTFOLIO_ID=$(echo "${RESP%$'\n'HTTP:*}" | jq -r '.id')
+          echo "Portfolio id: $PORTFOLIO_ID"
+          echo "id=$PORTFOLIO_ID" >> "$GITHUB_OUTPUT"
+
+      # ----------------------------------------------------------------
+      # 2. Resolve the selected project keys to branch UUIDs (the same
+      #    read-model endpoint Sonar's own project picker uses), then
+      #    assign them with the confirmed-working payload shape - see
+      #    header comment for how this was reverse-engineered.
+      # ----------------------------------------------------------------
+      - name: "2. Assign selected projects"
+        run: |
+          PORTFOLIO_ID="${{ steps.portfolio.outputs.id }}"
+          PROJECTS="$SELECTED_PROJECT_KEYS"
+
+          echo "--- GET /enterprises/portfolio-projects (resolve projectKey -> branchId) ---"
+          PROJECT_LIST=$(curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "$BASE/enterprises/portfolio-projects?portfolioId=$PORTFOLIO_ID&organizationId=$ORG_ID&q=&pageIndex=1")
+
+          BRANCH_IDS=$(echo "$PROJECTS" | jq -c --argjson list "$PROJECT_LIST" \
+            '[.[] as $k | ($list.projects[] | select(.projectKey == $k) | .branchId)]')
+          PROJECTS_PAYLOAD=$(echo "$BRANCH_IDS" | jq -c '[.[] | {branchId: .}]')
+
+          echo "Resolved $PROJECTS -> $PROJECTS_PAYLOAD"
+
+          echo "--- PATCH ?simulate=false {\"selection\":\"projects\",\"projects\":[{\"branchId\":...}]} ---"
+          RESP=$(curl -s -w "\nHTTP:%{http_code}" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"selection\":\"projects\",\"projects\":$PROJECTS_PAYLOAD}" \
+            "$BASE/enterprises/portfolios/$PORTFOLIO_ID?simulate=false")
+          echo "$RESP"
+
+      # ----------------------------------------------------------------
+      # 3. Verify and report plainly whether it actually took effect,
+      #    using both the portfolio's own projectCount and the
+      #    isSelected-per-project read model for a belt-and-braces check.
+      # ----------------------------------------------------------------
+      - name: "3. Verify"
+        run: |
+          PORTFOLIO_ID="${{ steps.portfolio.outputs.id }}"
+          BODY=$(curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PORTFOLIO_ID")
+          echo "$BODY" | jq .
+
+          COUNT=$(echo "$BODY" | jq -r '.projectCount // 0')
+          echo "Portfolio URL: https://sonarqube.us/enterprise/morganstanley/portfolios/$PORTFOLIO_ID"
+
+          echo "--- Selected projects per the read model ---"
+          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "$BASE/enterprises/portfolio-projects?portfolioId=$PORTFOLIO_ID&organizationId=$ORG_ID&q=&pageIndex=1" \
+            | jq '[.projects[] | select(.isSelected==true) | {projectKey, name}]'
+
+          if [ "$COUNT" = "0" ]; then
+            echo "::warning::projectCount is still 0 - project assignment did not take effect. Check the resolved branchId payload in step 2's log."
+          else
+            echo "Success: $COUNT project(s) assigned."
+          fi
