@@ -1,8 +1,9 @@
-# Throwaway diagnostic workflow (round 13). Safe to delete afterward.
-# Minimal isolation test: ONE project, brand-new portfolio, simulate=false,
-# nothing else in the body. See exactly what gets stored for a known input
-# branchId (c.demo's UUID from the real portfolio-projects read model).
-name: Probe Minimal Single Project Round 13
+# Throwaway diagnostic workflow (round 14). Safe to delete afterward.
+# Round 13 created portfolio 6256ec8d and PATCHed it immediately -
+# silently failed (projectCount stayed 0). Testing whether that was an
+# eventual-consistency/indexing-lag issue: retry the exact same PATCH on
+# the SAME (now-older) portfolio, without recreating it.
+name: Probe Retry Same Portfolio Round 14
 on:
   workflow_dispatch:
 jobs:
@@ -11,38 +12,25 @@ jobs:
     env:
       SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
       BASE: https://api.sonarqube.us
-      ENTERPRISE_ID: 896d0782-65b7-4d6f-ac7c-29d00e2ec684
       ORG_ID: 705a240f-23f9-4524-86cf-f50f6ccac3a8
+      PORTFOLIO_ID: 6256ec8d-9892-4e88-bfd6-030ff8e413df
       C_DEMO_UUID: 7c533ad0-f769-4e2b-a552-01f110de067c
+      CPP_DEMO_UUID: 536b2816-d7ff-493f-9546-e204769fc822
+      JAVA_DEMO_UUID: 6aefd5a1-006c-4425-91ab-bc4a22a509e8
     steps:
-      - name: "0. Create a fresh throwaway test portfolio"
-        id: portfolio
+      - name: "1. Re-PATCH the same portfolio from round 13, all 3 target projects"
         run: |
-          RESP=$(curl -s -w "\nHTTP:%{http_code}" -X POST \
-            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"zzz-probe13-cleanup-me\",\"description\":\"safe to delete\",\"selection\":\"projects\"}" \
-            "$BASE/enterprises/portfolios")
-          echo "$RESP"
-          PID=$(echo "${RESP%$'\n'HTTP:*}" | jq -r '.id')
-          echo "portfolio id: $PID"
-          echo "id=$PID" >> "$GITHUB_OUTPUT"
-
-      - name: "1. PATCH ?simulate=false with exactly ONE project, nothing else"
-        run: |
-          PID="${{ steps.portfolio.outputs.id }}"
-          echo "=== PATCH ?simulate=false, single project, c.demo UUID: $C_DEMO_UUID ==="
+          echo "=== PATCH ?simulate=false, retry on older portfolio ==="
           curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
             -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"projects\":[{\"branchId\":\"$C_DEMO_UUID\"}]}" \
-            "$BASE/enterprises/portfolios/$PID?simulate=false"
+            -d "{\"projects\":[{\"branchId\":\"$C_DEMO_UUID\"},{\"branchId\":\"$CPP_DEMO_UUID\"},{\"branchId\":\"$JAVA_DEMO_UUID\"}]}" \
+            "$BASE/enterprises/portfolios/$PORTFOLIO_ID?simulate=false"
 
       - name: "2. Verify via GET /enterprises/portfolios/{id}"
         run: |
-          PID="${{ steps.portfolio.outputs.id }}"
-          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PID" | jq .
+          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PORTFOLIO_ID" | jq .
 
       - name: "3. Verify via GET /enterprises/portfolio-projects (real read model, names included)"
         run: |
-          PID="${{ steps.portfolio.outputs.id }}"
           curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
-            "$BASE/enterprises/portfolio-projects?portfolioId=$PID&organizationId=$ORG_ID&q=&pageIndex=1" | jq '[.projects[] | select(.isSelected==true) | {projectKey, name, id}]'
+            "$BASE/enterprises/portfolio-projects?portfolioId=$PORTFOLIO_ID&organizationId=$ORG_ID&q=&pageIndex=1" | jq '[.projects[] | select(.isSelected==true) | {projectKey, name, id}]'
