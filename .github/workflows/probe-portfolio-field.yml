@@ -1,9 +1,12 @@
-# Throwaway diagnostic workflow (round 15). Safe to delete afterward.
-# New hypothesis: the ONLY successful attempt so far (afbfc049, round 11)
-# had draftStage=2 set from earlier steps. Every failing attempt never
-# set draftStage at all. Testing: does setting draftStage + projects
-# TOGETHER in one PATCH unlock it on a brand-new portfolio?
-name: Probe DraftStage Gate Round 15
+# Throwaway diagnostic workflow (round 16). Safe to delete afterward.
+# Untested combo: organizationIds committed via its OWN ?simulate=false
+# PATCH first (and verified persisted via GET), THEN a separate
+# ?simulate=false PATCH sets projects - mirroring the wizard's step-by-
+# step flow, rather than combining both fields in one call (round 12,
+# which failed) or setting projects with organizationIds still empty
+# (round 11, which "succeeded" but resolved to 5 unrelated projects -
+# consistent with organizationIds being unset/empty at match time).
+name: Probe Sequential Org Then Projects Round 16
 on:
   workflow_dispatch:
 jobs:
@@ -23,28 +26,42 @@ jobs:
         run: |
           RESP=$(curl -s -w "\nHTTP:%{http_code}" -X POST \
             -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"zzz-probe15-cleanup-me\",\"description\":\"safe to delete\",\"selection\":\"projects\"}" \
+            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"zzz-probe16-cleanup-me\",\"description\":\"safe to delete\",\"selection\":\"projects\"}" \
             "$BASE/enterprises/portfolios")
           echo "$RESP"
           PID=$(echo "${RESP%$'\n'HTTP:*}" | jq -r '.id')
           echo "portfolio id: $PID"
           echo "id=$PID" >> "$GITHUB_OUTPUT"
 
-      - name: "1. PATCH ?simulate=false with draftStage:2 AND projects together"
+      - name: "1. PATCH ?simulate=false with ONLY organizationIds"
         run: |
           PID="${{ steps.portfolio.outputs.id }}"
-          echo "=== PATCH {draftStage:2, projects:[{branchId}]} ==="
+          echo "=== step 1: PATCH ?simulate=false {organizationIds} ==="
           curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
             -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"draftStage\":2,\"projects\":[{\"branchId\":\"$C_DEMO_UUID\"},{\"branchId\":\"$CPP_DEMO_UUID\"},{\"branchId\":\"$JAVA_DEMO_UUID\"}]}" \
+            -d "{\"organizationIds\":[\"$ORG_ID\"]}" \
             "$BASE/enterprises/portfolios/$PID?simulate=false"
 
-      - name: "2. Verify via GET /enterprises/portfolios/{id}"
+      - name: "2. Verify organizationIds actually persisted"
         run: |
           PID="${{ steps.portfolio.outputs.id }}"
           curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PID" | jq .
 
-      - name: "3. Verify via GET /enterprises/portfolio-projects (real read model, names included)"
+      - name: "3. PATCH ?simulate=false with ONLY projects (org already committed)"
+        run: |
+          PID="${{ steps.portfolio.outputs.id }}"
+          echo "=== step 3: PATCH ?simulate=false {projects:[{branchId}]} ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projects\":[{\"branchId\":\"$C_DEMO_UUID\"},{\"branchId\":\"$CPP_DEMO_UUID\"},{\"branchId\":\"$JAVA_DEMO_UUID\"}]}" \
+            "$BASE/enterprises/portfolios/$PID?simulate=false"
+
+      - name: "4. Final verify via GET /enterprises/portfolios/{id}"
+        run: |
+          PID="${{ steps.portfolio.outputs.id }}"
+          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PID" | jq .
+
+      - name: "5. Final verify via GET /enterprises/portfolio-projects (real read model, names included)"
         run: |
           PID="${{ steps.portfolio.outputs.id }}"
           curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
