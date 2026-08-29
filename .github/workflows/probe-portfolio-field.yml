@@ -1,9 +1,8 @@
-# Throwaway diagnostic workflow (round 7). Safe to delete afterward.
-# New hypothesis: manual "projects" selection also needs organizationIds
-# set on the portfolio (every portfolio we've seen with nonzero
-# projectCount had organizationIds populated) - matching the UI flow of
-# "pick org, then pick individual projects".
-name: Probe Portfolio Project Field Round 7
+# Throwaway diagnostic workflow (round 8) - read-only. Compare the real
+# working portfolio (454cbe22, created via the actual UI and confirmed to
+# have real project selections) against our failing throwaway ones, to
+# find what field differs.
+name: Probe Compare Working Portfolio
 on:
   workflow_dispatch:
 jobs:
@@ -12,45 +11,13 @@ jobs:
     env:
       SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
       BASE: https://api.sonarqube.us
-      ORG_ID: 705a240f-23f9-4524-86cf-f50f6ccac3a8
-      PORTFOLIO_ID: 0e8e7a7e-34ad-40b1-aca0-9a83b330721e
-      C_DEMO_UUID: 7c533ad0-f769-4e2b-a552-01f110de067c
-      CPP_DEMO_UUID: 536b2816-d7ff-493f-9546-e204769fc822
-      JAVA_DEMO_UUID: 6aefd5a1-006c-4425-91ab-bc4a22a509e8
+      WORKING_PORTFOLIO_ID: 454cbe22-e85b-4107-886e-17259da87ece
+      BROKEN_PORTFOLIO_ID: 0e8e7a7e-34ad-40b1-aca0-9a83b330721e
     steps:
-      - name: "1. PATCH with organizationIds + projects together"
+      - name: "A. GET the real working portfolio (454cbe22)"
         run: |
-          echo "=== {organizationIds, projects:[{branchId}]} combined ==="
-          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
-            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"organizationIds\":[\"$ORG_ID\"],\"projects\":[{\"branchId\":\"$C_DEMO_UUID\"},{\"branchId\":\"$CPP_DEMO_UUID\"},{\"branchId\":\"$JAVA_DEMO_UUID\"}]}" \
-            "$BASE/enterprises/portfolios/$PORTFOLIO_ID"
+          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$WORKING_PORTFOLIO_ID" | jq .
 
-      - name: "2. Verify"
+      - name: "B. GET our broken throwaway portfolio (0e8e7a7e)"
         run: |
-          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PORTFOLIO_ID" | jq .
-
-      - name: "3. Two-step: PATCH organizationIds ALONE first"
-        run: |
-          echo "=== step A: {organizationIds} alone ==="
-          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
-            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"organizationIds\":[\"$ORG_ID\"]}" \
-            "$BASE/enterprises/portfolios/$PORTFOLIO_ID"
-
-      - name: "4. Then PATCH projects alone (org already set)"
-        run: |
-          echo "=== step B: {projects:[{branchId}]} alone, org already set ==="
-          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
-            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"projects\":[{\"branchId\":\"$C_DEMO_UUID\"},{\"branchId\":\"$CPP_DEMO_UUID\"},{\"branchId\":\"$JAVA_DEMO_UUID\"}]}" \
-            "$BASE/enterprises/portfolios/$PORTFOLIO_ID"
-
-      - name: "5. Final verify via GET /enterprises/portfolios/{id}"
-        run: |
-          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PORTFOLIO_ID" | jq .
-
-      - name: "6. Final verify via GET /enterprises/portfolio-projects (real read model)"
-        run: |
-          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
-            "$BASE/enterprises/portfolio-projects?portfolioId=$PORTFOLIO_ID&organizationId=$ORG_ID&q=&pageIndex=1" | jq '[.projects[] | select(.isSelected==true)]'
+          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$BROKEN_PORTFOLIO_ID" | jq .
