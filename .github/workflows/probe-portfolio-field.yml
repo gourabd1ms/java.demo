@@ -1,8 +1,9 @@
-# Throwaway diagnostic workflow (round 8) - read-only. Compare the real
-# working portfolio (454cbe22, created via the actual UI and confirmed to
-# have real project selections) against our failing throwaway ones, to
-# find what field differs.
-name: Probe Compare Working Portfolio
+# Throwaway diagnostic workflow (round 9). Safe to delete afterward.
+# The real working portfolio 454cbe22 stores each assigned project as
+# BOTH branchId AND id (same UUID value in both). Never tried that exact
+# two-field pair before (only branchId alone, or with extra fields mixed
+# in like projectKey).
+name: Probe Portfolio Project Field Round 9
 on:
   workflow_dispatch:
 jobs:
@@ -11,13 +12,25 @@ jobs:
     env:
       SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
       BASE: https://api.sonarqube.us
-      WORKING_PORTFOLIO_ID: 454cbe22-e85b-4107-886e-17259da87ece
-      BROKEN_PORTFOLIO_ID: 0e8e7a7e-34ad-40b1-aca0-9a83b330721e
+      ORG_ID: 705a240f-23f9-4524-86cf-f50f6ccac3a8
+      PORTFOLIO_ID: 0e8e7a7e-34ad-40b1-aca0-9a83b330721e
+      C_DEMO_UUID: 7c533ad0-f769-4e2b-a552-01f110de067c
+      CPP_DEMO_UUID: 536b2816-d7ff-493f-9546-e204769fc822
+      JAVA_DEMO_UUID: 6aefd5a1-006c-4425-91ab-bc4a22a509e8
     steps:
-      - name: "A. GET the real working portfolio (454cbe22)"
+      - name: "1. PATCH with {branchId, id} pair (matching real working portfolio's stored shape)"
         run: |
-          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$WORKING_PORTFOLIO_ID" | jq .
+          echo "=== {branchId, id} for c.demo, cpp.demo, java.demo ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projects\":[{\"branchId\":\"$C_DEMO_UUID\",\"id\":\"$C_DEMO_UUID\"},{\"branchId\":\"$CPP_DEMO_UUID\",\"id\":\"$CPP_DEMO_UUID\"},{\"branchId\":\"$JAVA_DEMO_UUID\",\"id\":\"$JAVA_DEMO_UUID\"}]}" \
+            "$BASE/enterprises/portfolios/$PORTFOLIO_ID"
 
-      - name: "B. GET our broken throwaway portfolio (0e8e7a7e)"
+      - name: "2. Verify via GET /enterprises/portfolios/{id}"
         run: |
-          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$BROKEN_PORTFOLIO_ID" | jq .
+          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PORTFOLIO_ID" | jq .
+
+      - name: "3. Verify via GET /enterprises/portfolio-projects (real read model)"
+        run: |
+          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "$BASE/enterprises/portfolio-projects?portfolioId=$PORTFOLIO_ID&organizationId=$ORG_ID&q=&pageIndex=1" | jq '[.projects[] | select(.isSelected==true)]'
