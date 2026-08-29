@@ -1,8 +1,9 @@
-# Throwaway diagnostic workflow (round 4) - read-only. Inspects the real
-# /enterprises/portfolio-projects endpoint captured from the browser
-# DevTools Network tab, to learn its response shape before guessing at the
-# add/write request. Safe to delete afterward.
-name: Probe Portfolio Projects Endpoint
+# Throwaway diagnostic workflow (round 5). Safe to delete afterward.
+# New hypothesis from the real /enterprises/portfolio-projects read model:
+# each project there has {projectKey, id, branchId} (id == branchId ==
+# project's UUID). Never tried sending all 3 together as the array item
+# shape for PATCH /enterprises/portfolios/{id} {"projects":[...]}.
+name: Probe Portfolio Project Field Round 5
 on:
   workflow_dispatch:
 jobs:
@@ -11,23 +12,40 @@ jobs:
     env:
       SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
       BASE: https://api.sonarqube.us
+      ENTERPRISE_ID: 896d0782-65b7-4d6f-ac7c-29d00e2ec684
       ORG_ID: 705a240f-23f9-4524-86cf-f50f6ccac3a8
-      PORTFOLIO_ID: 454cbe22-e85b-4107-886e-17259da87ece
+      # c.demo, from the real portfolio-projects read model
+      PROJECT_KEY: gourabd1ms_c.demo
+      PROJECT_UUID: 7c533ad0-f769-4e2b-a552-01f110de067c
     steps:
-      - name: A. GET /enterprises/portfolio-projects (as captured from browser)
+      - name: "0. Create a fresh throwaway test portfolio"
+        id: portfolio
         run: |
-          echo "=== GET /enterprises/portfolio-projects ==="
-          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
-            "$BASE/enterprises/portfolio-projects?portfolioId=$PORTFOLIO_ID&organizationId=$ORG_ID&q=&pageIndex=1" | jq .
+          RESP=$(curl -s -w "\nHTTP:%{http_code}" -X POST \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"zzz-probe5-cleanup-me\",\"description\":\"safe to delete\",\"selection\":\"projects\"}" \
+            "$BASE/enterprises/portfolios")
+          echo "$RESP"
+          PID=$(echo "${RESP%$'\n'HTTP:*}" | jq -r '.id')
+          echo "portfolio id: $PID"
+          echo "id=$PID" >> "$GITHUB_OUTPUT"
 
-      - name: B. GET with a search term (q=java)
+      - name: "1. PATCH with {projectKey, id, branchId} shape"
         run: |
-          echo "=== GET with q=java ==="
-          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
-            "$BASE/enterprises/portfolio-projects?portfolioId=$PORTFOLIO_ID&organizationId=$ORG_ID&q=java&pageIndex=1" | jq .
+          PID="${{ steps.portfolio.outputs.id }}"
+          echo "=== {projectKey, id, branchId} ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"projects\":[{\"projectKey\":\"$PROJECT_KEY\",\"id\":\"$PROJECT_UUID\",\"branchId\":\"$PROJECT_UUID\"}]}" \
+            "$BASE/enterprises/portfolios/$PID"
 
-      - name: C. GET the portfolio itself for comparison
+      - name: "2. Verify via GET /enterprises/portfolios/{id}"
         run: |
-          echo "=== GET /enterprises/portfolios/$PORTFOLIO_ID ==="
-          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
-            "$BASE/enterprises/portfolios/$PORTFOLIO_ID" | jq .
+          PID="${{ steps.portfolio.outputs.id }}"
+          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PID" | jq .
+
+      - name: "3. Verify via GET /enterprises/portfolio-projects (real read model)"
+        run: |
+          PID="${{ steps.portfolio.outputs.id }}"
+          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "$BASE/enterprises/portfolio-projects?portfolioId=$PID&organizationId=$ORG_ID&q=c.demo&pageIndex=1" | jq .
