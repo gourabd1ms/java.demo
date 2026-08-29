@@ -1,11 +1,11 @@
-# Throwaway diagnostic workflow (round 11). Safe to delete afterward.
-# Captured from real browser traffic: the UI calls
-# PATCH /enterprises/portfolios/{id}?simulate=false when actually
-# committing a change. Every prior PATCH we sent omitted "simulate"
-# entirely - almost certainly defaulting to a dry-run/preview mode, which
-# would explain every single silent no-op so far regardless of payload
-# shape.
-name: Probe Simulate Param Round 11
+# Throwaway diagnostic workflow (round 12). Safe to delete afterward.
+# Round 11 proved ?simulate=false actually persists (projectCount went
+# from 0 to 5!) but resolved to 5 UNRELATED branch UUIDs instead of the 3
+# we asked for - likely because organizationIds was never set, so it may
+# have resolved against the wrong scope within the enterprise. Testing
+# ?simulate=false combined with organizationIds set correctly, on a fresh
+# portfolio.
+name: Probe Simulate Plus OrgIds Round 12
 on:
   workflow_dispatch:
 jobs:
@@ -14,25 +14,40 @@ jobs:
     env:
       SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
       BASE: https://api.sonarqube.us
+      ENTERPRISE_ID: 896d0782-65b7-4d6f-ac7c-29d00e2ec684
       ORG_ID: 705a240f-23f9-4524-86cf-f50f6ccac3a8
-      PORTFOLIO_ID: afbfc049-155d-4f6c-922e-a08294821ca9
       C_DEMO_UUID: 7c533ad0-f769-4e2b-a552-01f110de067c
       CPP_DEMO_UUID: 536b2816-d7ff-493f-9546-e204769fc822
       JAVA_DEMO_UUID: 6aefd5a1-006c-4425-91ab-bc4a22a509e8
     steps:
-      - name: "1. PATCH with ?simulate=false and documented {branchId} shape"
+      - name: "0. Create a fresh throwaway test portfolio"
+        id: portfolio
         run: |
-          echo "=== PATCH .../portfolios/$PORTFOLIO_ID?simulate=false ==="
+          RESP=$(curl -s -w "\nHTTP:%{http_code}" -X POST \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"enterpriseId\":\"$ENTERPRISE_ID\",\"name\":\"zzz-probe12-cleanup-me\",\"description\":\"safe to delete\",\"selection\":\"projects\"}" \
+            "$BASE/enterprises/portfolios")
+          echo "$RESP"
+          PID=$(echo "${RESP%$'\n'HTTP:*}" | jq -r '.id')
+          echo "portfolio id: $PID"
+          echo "id=$PID" >> "$GITHUB_OUTPUT"
+
+      - name: "1. PATCH ?simulate=false with organizationIds + projects together"
+        run: |
+          PID="${{ steps.portfolio.outputs.id }}"
+          echo "=== PATCH ?simulate=false {organizationIds, projects:[{branchId}]} ==="
           curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
             -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"projects\":[{\"branchId\":\"$C_DEMO_UUID\"},{\"branchId\":\"$CPP_DEMO_UUID\"},{\"branchId\":\"$JAVA_DEMO_UUID\"}]}" \
-            "$BASE/enterprises/portfolios/$PORTFOLIO_ID?simulate=false"
+            -d "{\"organizationIds\":[\"$ORG_ID\"],\"projects\":[{\"branchId\":\"$C_DEMO_UUID\"},{\"branchId\":\"$CPP_DEMO_UUID\"},{\"branchId\":\"$JAVA_DEMO_UUID\"}]}" \
+            "$BASE/enterprises/portfolios/$PID?simulate=false"
 
       - name: "2. Verify via GET /enterprises/portfolios/{id}"
         run: |
-          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PORTFOLIO_ID" | jq .
+          PID="${{ steps.portfolio.outputs.id }}"
+          curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PID" | jq .
 
-      - name: "3. Verify via GET /enterprises/portfolio-projects (real read model)"
+      - name: "3. Verify via GET /enterprises/portfolio-projects (real read model, names included)"
         run: |
+          PID="${{ steps.portfolio.outputs.id }}"
           curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
-            "$BASE/enterprises/portfolio-projects?portfolioId=$PORTFOLIO_ID&organizationId=$ORG_ID&q=&pageIndex=1" | jq '[.projects[] | select(.isSelected==true)]'
+            "$BASE/enterprises/portfolio-projects?portfolioId=$PID&organizationId=$ORG_ID&q=&pageIndex=1" | jq '[.projects[] | select(.isSelected==true) | {projectKey, name, id}]'
