@@ -33,21 +33,27 @@
 #      an actual nested hierarchy - Sonar's Enterprise API does not yet
 #      support that server-side.
 #
-#   2. Assigning specific projects to a portfolio via PATCH (step 6). The
-#      body field is "projects": [<object>], confirmed from a Jackson
-#      error naming `ChangePortfolioRequest.projects` /
-#      `PortfolioProjectRequest` - but every candidate field name tried for
-#      the object itself (key, project, projectKey, id, componentKey,
-#      component, projectId, name, uuid, projectKey+organizationId/Key,
-#      nested {project:{key}}, manualProjects, projectKeys, addProjects,
-#      projectKeysToAdd) is silently accepted (HTTP 200) and left
-#      projectCount at 0 - i.e. it's a no-op, not a validation error. This
-#      looks like an unfinished part of the API rather than a naming
-#      mistake on our side.
+#   2. Assigning specific projects to a portfolio via PATCH (step 6) - THIS
+#      IS NOW CONFIRMED WORKING. Reverse-engineered from a real browser
+#      session (HAR capture) rather than guesswork: the request must
+#      include BOTH "selection":"projects" AND the "projects" array
+#      (each item shaped as {"branchId": "<project-branch-uuid>"}) in the
+#      SAME PATCH body, and the query string must carry ?simulate=false:
 #
-# If Sonar ships either feature later, or if you find the right shape from
-# their docs/support, only steps 4 and 6 need updating - discovery,
-# portfolio creation, and the demo-project split all work today.
+#        PATCH /enterprises/portfolios/{id}?simulate=false
+#        {"selection":"projects","projects":[{"branchId":"<uuid>"}, ...]}
+#
+#      Every earlier attempt failed because it either omitted "selection"
+#      from that same call, used the wrong key inside the array items
+#      (key/project/projectKey/id/componentKey/...), or split
+#      organizationIds and projects across two separate PATCH calls.
+#      "branchId" is a project-branch UUID, not the project key - step 6
+#      resolves keys to UUIDs first via GET /enterprises/portfolio-projects
+#      (the same read-model endpoint the Sonar UI's project picker uses).
+#
+# If Sonar ships true portfolio nesting later, only step 4 needs
+# revisiting - discovery, portfolio creation, the demo-project split, and
+# project assignment (step 6) all work today.
 # ============================================================================
 name: Sonar Create Portfolio Hierarchy
 
@@ -186,72 +192,40 @@ jobs:
           echo "child2_projects=$CHILD2_PROJECTS" >> "$GITHUB_OUTPUT"
 
       # ----------------------------------------------------------------
-      # 6. Assign each half to its portfolio. The correct PATCH field name
-      #    for attaching projects isn't documented, so try a few candidate
-      #    shapes per portfolio, checking projectCount in the response
-      #    after each try, and stop at the first one that actually
-      #    attaches something.
+      # 6. Resolve each project key to its branch UUID (the read-model
+      #    endpoint behind Sonar's own project picker), then assign each
+      #    half to its portfolio with the confirmed-working payload shape:
+      #    {"selection":"projects","projects":[{"branchId":...}, ...]}
+      #    via PATCH ?simulate=false. See header comment for how this was
+      #    reverse-engineered from a real browser HAR capture.
       # ----------------------------------------------------------------
       - name: "6. Assign projects to child1 and child2"
         run: |
+          echo "--- GET /enterprises/portfolio-projects (resolve projectKey -> branchId) ---"
+          PROJECT_LIST=$(curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "$BASE/enterprises/portfolio-projects?portfolioId=${{ steps.parent.outputs.id }}&organizationId=$ORG_ID&q=&pageIndex=1")
+
           assign_projects() {
             local PORTFOLIO_ID="$1"
-            local PROJECTS_JSON="$2"   # e.g. ["key1","key2"]
+            local PROJECT_KEYS_JSON="$2"   # e.g. ["key1","key2"]
             local LABEL="$3"
 
-            echo "=== Assigning projects to $LABEL ($PORTFOLIO_ID): $PROJECTS_JSON ==="
+            BRANCH_IDS=$(echo "$PROJECT_KEYS_JSON" | jq -c --argjson list "$PROJECT_LIST" \
+              '[.[] as $k | ($list.projects[] | select(.projectKey == $k) | .branchId)]')
+            PROJECTS_PAYLOAD=$(echo "$BRANCH_IDS" | jq -c '[.[] | {branchId: .}]')
 
-            # Candidate 1: plain array of key strings.
-            echo "--- candidate 1: {\"projects\": [\"key\", ...]} ---"
+            echo "=== Assigning to $LABEL ($PORTFOLIO_ID): $PROJECT_KEYS_JSON -> $PROJECTS_PAYLOAD ==="
             RESP=$(curl -s -w "\nHTTP:%{http_code}" -X PATCH \
               -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-              -d "{\"projects\":$PROJECTS_JSON}" \
-              "$BASE/enterprises/portfolios/$PORTFOLIO_ID")
+              -d "{\"selection\":\"projects\",\"projects\":$PROJECTS_PAYLOAD}" \
+              "$BASE/enterprises/portfolios/$PORTFOLIO_ID?simulate=false")
             echo "$RESP"
             COUNT=$(echo "${RESP%$'\n'HTTP:*}" | jq -r '.projectCount // 0')
-            [ "$COUNT" != "0" ] && [ -n "$COUNT" ] && { echo "$LABEL: candidate 1 worked (projectCount=$COUNT)"; return; }
-
-            # Candidate 2: selection:"manual" + plain array of key strings.
-            echo "--- candidate 2: {\"selection\":\"manual\",\"projects\":[...]} ---"
-            RESP=$(curl -s -w "\nHTTP:%{http_code}" -X PATCH \
-              -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-              -d "{\"selection\":\"manual\",\"projects\":$PROJECTS_JSON}" \
-              "$BASE/enterprises/portfolios/$PORTFOLIO_ID")
-            echo "$RESP"
-            COUNT=$(echo "${RESP%$'\n'HTTP:*}" | jq -r '.projectCount // 0')
-            [ "$COUNT" != "0" ] && [ -n "$COUNT" ] && { echo "$LABEL: candidate 2 worked (projectCount=$COUNT)"; return; }
-
-            # Candidate 3: manualProjects field.
-            echo "--- candidate 3: {\"manualProjects\":[...]} ---"
-            RESP=$(curl -s -w "\nHTTP:%{http_code}" -X PATCH \
-              -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-              -d "{\"manualProjects\":$PROJECTS_JSON}" \
-              "$BASE/enterprises/portfolios/$PORTFOLIO_ID")
-            echo "$RESP"
-            COUNT=$(echo "${RESP%$'\n'HTTP:*}" | jq -r '.projectCount // 0')
-            [ "$COUNT" != "0" ] && [ -n "$COUNT" ] && { echo "$LABEL: candidate 3 worked (projectCount=$COUNT)"; return; }
-
-            # Candidate 4: projectKeys field.
-            echo "--- candidate 4: {\"projectKeys\":[...]} ---"
-            RESP=$(curl -s -w "\nHTTP:%{http_code}" -X PATCH \
-              -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-              -d "{\"projectKeys\":$PROJECTS_JSON}" \
-              "$BASE/enterprises/portfolios/$PORTFOLIO_ID")
-            echo "$RESP"
-            COUNT=$(echo "${RESP%$'\n'HTTP:*}" | jq -r '.projectCount // 0')
-            [ "$COUNT" != "0" ] && [ -n "$COUNT" ] && { echo "$LABEL: candidate 4 worked (projectCount=$COUNT)"; return; }
-
-            # Candidate 5: per-project POST to a /projects sub-resource
-            # (only meaningful if the portfolio id itself is valid).
-            echo "--- candidate 5: POST /enterprises/portfolios/$PORTFOLIO_ID/projects per project ---"
-            for KEY in $(echo "$PROJECTS_JSON" | jq -r '.[]'); do
-              curl -s -w "\nHTTP:%{http_code}\n" -X POST \
-                -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-                -d "{\"projectKey\":\"$KEY\"}" \
-                "$BASE/enterprises/portfolios/$PORTFOLIO_ID/projects"
-            done
-
-            echo "::warning::None of the known candidate payload shapes confirmed a nonzero projectCount for $LABEL - check the raw responses above to find the real field name."
+            if [ "$COUNT" = "0" ] || [ -z "$COUNT" ]; then
+              echo "::warning::$LABEL: projectCount is 0 after assignment - check PROJECT_LIST resolution above."
+            else
+              echo "$LABEL: assigned $COUNT project(s)."
+            fi
           }
 
           assign_projects "${{ steps.children.outputs.child1_id }}" '${{ steps.split.outputs.child1_projects }}' "child1"
