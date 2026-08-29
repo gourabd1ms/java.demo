@@ -1,0 +1,33 @@
+# Throwaway diagnostic workflow (round 4) - read-only. Inspects the real
+# /enterprises/portfolio-projects endpoint captured from the browser
+# DevTools Network tab, to learn its response shape before guessing at the
+# add/write request. Safe to delete afterward.
+name: Probe Portfolio Projects Endpoint
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
+      BASE: https://api.sonarqube.us
+      ORG_ID: 705a240f-23f9-4524-86cf-f50f6ccac3a8
+      PORTFOLIO_ID: 454cbe22-e85b-4107-886e-17259da87ece
+    steps:
+      - name: A. GET /enterprises/portfolio-projects (as captured from browser)
+        run: |
+          echo "=== GET /enterprises/portfolio-projects ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "$BASE/enterprises/portfolio-projects?portfolioId=$PORTFOLIO_ID&organizationId=$ORG_ID&q=&pageIndex=1" | jq .
+
+      - name: B. GET with a search term (q=java)
+        run: |
+          echo "=== GET with q=java ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "$BASE/enterprises/portfolio-projects?portfolioId=$PORTFOLIO_ID&organizationId=$ORG_ID&q=java&pageIndex=1" | jq .
+
+      - name: C. GET the portfolio itself for comparison
+        run: |
+          echo "=== GET /enterprises/portfolios/$PORTFOLIO_ID ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
+            "$BASE/enterprises/portfolios/$PORTFOLIO_ID" | jq .
