@@ -1,10 +1,9 @@
-# Throwaway diagnostic workflow (round 6). Safe to delete afterward.
-# From the actual Swagger schema for PATCH /portfolios/{portfolioId}, the
-# "projects" array items have EXACTLY ONE field: "branchId" (the
-# project's UUID, same value as the "id"/"branchId" fields returned by
-# GET /enterprises/portfolio-projects). Never tried alone before - always
-# bundled with other fields.
-name: Probe Portfolio Project Field Round 6
+# Throwaway diagnostic workflow (round 7). Safe to delete afterward.
+# New hypothesis: manual "projects" selection also needs organizationIds
+# set on the portfolio (every portfolio we've seen with nonzero
+# projectCount had organizationIds populated) - matching the UI flow of
+# "pick org, then pick individual projects".
+name: Probe Portfolio Project Field Round 7
 on:
   workflow_dispatch:
 jobs:
@@ -15,36 +14,43 @@ jobs:
       BASE: https://api.sonarqube.us
       ORG_ID: 705a240f-23f9-4524-86cf-f50f6ccac3a8
       PORTFOLIO_ID: 0e8e7a7e-34ad-40b1-aca0-9a83b330721e
-      # c.demo, cpp.demo, java.demo project UUIDs (== branchId)
       C_DEMO_UUID: 7c533ad0-f769-4e2b-a552-01f110de067c
       CPP_DEMO_UUID: 536b2816-d7ff-493f-9546-e204769fc822
       JAVA_DEMO_UUID: 6aefd5a1-006c-4425-91ab-bc4a22a509e8
     steps:
-      - name: "1. PATCH with exact documented shape: {branchId} only"
+      - name: "1. PATCH with organizationIds + projects together"
         run: |
-          echo "=== {branchId} only, single project ==="
+          echo "=== {organizationIds, projects:[{branchId}]} combined ==="
           curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
             -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
-            -d "{\"projects\":[{\"branchId\":\"$C_DEMO_UUID\"}]}" \
+            -d "{\"organizationIds\":[\"$ORG_ID\"],\"projects\":[{\"branchId\":\"$C_DEMO_UUID\"},{\"branchId\":\"$CPP_DEMO_UUID\"},{\"branchId\":\"$JAVA_DEMO_UUID\"}]}" \
             "$BASE/enterprises/portfolios/$PORTFOLIO_ID"
 
-      - name: "2. Verify via GET /enterprises/portfolios/{id}"
+      - name: "2. Verify"
         run: |
           curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PORTFOLIO_ID" | jq .
 
-      - name: "3. If that worked, PATCH with all 3 selected projects"
+      - name: "3. Two-step: PATCH organizationIds ALONE first"
         run: |
-          echo "=== {branchId} for c.demo, cpp.demo, java.demo ==="
+          echo "=== step A: {organizationIds} alone ==="
+          curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
+            -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"organizationIds\":[\"$ORG_ID\"]}" \
+            "$BASE/enterprises/portfolios/$PORTFOLIO_ID"
+
+      - name: "4. Then PATCH projects alone (org already set)"
+        run: |
+          echo "=== step B: {projects:[{branchId}]} alone, org already set ==="
           curl -s -w "\nHTTP:%{http_code}\n" -X PATCH \
             -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" -H "Content-Type: application/json" \
             -d "{\"projects\":[{\"branchId\":\"$C_DEMO_UUID\"},{\"branchId\":\"$CPP_DEMO_UUID\"},{\"branchId\":\"$JAVA_DEMO_UUID\"}]}" \
             "$BASE/enterprises/portfolios/$PORTFOLIO_ID"
 
-      - name: "4. Final verify via GET /enterprises/portfolios/{id}"
+      - name: "5. Final verify via GET /enterprises/portfolios/{id}"
         run: |
           curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" "$BASE/enterprises/portfolios/$PORTFOLIO_ID" | jq .
 
-      - name: "5. Final verify via GET /enterprises/portfolio-projects (real read model)"
+      - name: "6. Final verify via GET /enterprises/portfolio-projects (real read model)"
         run: |
           curl -s -H "Authorization: Bearer $SONAR_ENT_TOKEN" -H "accept: application/json" \
-            "$BASE/enterprises/portfolio-projects?portfolioId=$PORTFOLIO_ID&organizationId=$ORG_ID&q=&pageIndex=1" | jq '.projects[] | select(.isSelected==true)'
+            "$BASE/enterprises/portfolio-projects?portfolioId=$PORTFOLIO_ID&organizationId=$ORG_ID&q=&pageIndex=1" | jq '[.projects[] | select(.isSelected==true)]'
