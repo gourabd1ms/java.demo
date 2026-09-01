@@ -1,0 +1,38 @@
+name: Sonar - Associate Java Profile to java.demo
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/sonar-associate-profile.yml'
+  workflow_dispatch: {}
+
+env:
+  SONAR_HOST: https://sonarqube.us
+  SONAR_ORG: gourabd1ms
+  PROJECT_KEY: gourabd1ms_java.demo
+  PROFILE_NAME: Demo-Java-Ruleset
+
+jobs:
+  associate-profile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Associate quality profile with project
+        run: |
+          RESP=$(curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+            "$SONAR_HOST/api/qualityprofiles/add_project" \
+            --data-urlencode "organization=$SONAR_ORG" \
+            --data-urlencode "project=$PROJECT_KEY" \
+            --data-urlencode "language=java" \
+            --data-urlencode "qualityProfile=$PROFILE_NAME")
+          echo "add_project: ${RESP:-<empty = success>}"
+          if echo "$RESP" | grep -q '"errors"'; then
+            echo "::error::Failed to associate $PROFILE_NAME with $PROJECT_KEY"
+            exit 1
+          fi
+
+      - name: Verify association
+        run: |
+          curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" \
+            "$SONAR_HOST/api/qualityprofiles/search?organization=$SONAR_ORG&project=$PROJECT_KEY" \
+            | jq -r '.profiles[] | "\(.language)\t\(.name)\tdefault=\(.isDefault)"'

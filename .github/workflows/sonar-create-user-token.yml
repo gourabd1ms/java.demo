@@ -1,0 +1,61 @@
+name: Sonar - Create User Token for gourabd1ms
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/sonar-create-user-token.yml'
+  workflow_dispatch:
+    inputs:
+      reveal:
+        description: 'Print the generated token in the log (INSECURE - anyone with log access sees it)'
+        type: boolean
+        default: false
+
+env:
+  SONAR_HOST: https://sonarqube.us
+  SONAR_ORG: gourabd1ms
+
+jobs:
+  create-user-token:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve login for gourabd1ms
+        id: login
+        run: |
+          LOGIN=$(curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" \
+            "$SONAR_HOST/api/organizations/search_members?organization=$SONAR_ORG&ps=500" \
+            | jq -r '(.users // .members // [])[] | select(.name=="gourabd1ms" or (.login|startswith("gourabd1ms"))) | .login' | head -1)
+          if [ -z "$LOGIN" ]; then
+            echo "::error::Could not resolve a login for gourabd1ms"
+            exit 1
+          fi
+          echo "Resolved login: $LOGIN"
+          echo "login=$LOGIN" >> "$GITHUB_OUTPUT"
+
+      - name: Generate user token
+        run: |
+          TOKEN_NAME="gh-actions-demo-$(date +%s)"
+          RESP=$(curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+            "$SONAR_HOST/api/user_tokens/generate" \
+            --data-urlencode "name=$TOKEN_NAME" \
+            --data-urlencode "login=${{ steps.login.outputs.login }}")
+          VALUE=$(echo "$RESP" | jq -r '.token // empty')
+          if [ -z "$VALUE" ]; then
+            echo "Response: $RESP"
+            echo "::error::Token generation failed"
+            exit 1
+          fi
+          echo "::add-mask::$VALUE"
+          echo "$RESP" | jq 'del(.token)'
+          echo "::notice::Token '$TOKEN_NAME' created for ${{ steps.login.outputs.login }}. Value is masked; store it in a secret manager if revealed."
+          if [ "${{ inputs.reveal }}" = "true" ]; then
+            echo "Token value (chars, space-separated to defeat masking): $(echo -n "$VALUE" | sed 's/./& /g')"
+            echo "::warning::Token value was printed to the log. Revoke it after use via api/user_tokens/revoke."
+          fi
+
+      - name: List existing tokens for the user
+        run: |
+          curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" \
+            "$SONAR_HOST/api/user_tokens/search?login=${{ steps.login.outputs.login }}" \
+            | jq -r '.userTokens[] | "\(.name)\t\(.createdAt)"'

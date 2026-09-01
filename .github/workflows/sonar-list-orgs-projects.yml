@@ -1,0 +1,64 @@
+name: Sonar - List Enterprise Orgs and Project Counts
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/sonar-list-orgs-projects.yml'
+  workflow_dispatch: {}
+
+env:
+  SONAR_HOST: https://sonarqube.us
+  ENTERPRISE: morganstanley
+
+jobs:
+  list-orgs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe enterprise/organization endpoints
+        run: |
+          for URL in \
+            "/api/enterprises/search" \
+            "/api/enterprises/organizations?enterprise=$ENTERPRISE" \
+            "/api/organizations/search?enterprise=$ENTERPRISE&ps=500" \
+            "/api/organizations/search?ps=500" \
+            "/api/organizations/search?member=true&ps=500"; do
+            echo "=== GET $URL"
+            curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" "$SONAR_HOST$URL" | head -c 2000
+            echo
+          done
+
+      - name: Collect org keys and count projects
+        run: |
+          for URL in \
+            "/api/enterprises/organizations?enterprise=$ENTERPRISE&ps=500" \
+            "/api/organizations/search?enterprise=$ENTERPRISE&ps=500" \
+            "/api/organizations/search?ps=500"; do
+            curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" "$SONAR_HOST$URL" -o orgs.json
+            KEYS=$(jq -r '(.organizations // .organizationList // [])[].key' orgs.json 2>/dev/null)
+            if [ -n "$KEYS" ]; then
+              echo "Using $URL"
+              break
+            fi
+          done
+          if [ -z "$KEYS" ]; then
+            echo "::error::No organizations could be listed with this token"
+            exit 1
+          fi
+          COUNT=$(echo "$KEYS" | wc -l)
+          echo "::notice::Organizations visible: $COUNT"
+          echo
+          printf '%-40s %s\n' "ORGANIZATION" "PROJECTS"
+          TOTAL=0
+          for KEY in $KEYS; do
+            N=$(curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" \
+              "$SONAR_HOST/api/projects/search?organization=$KEY&ps=1" | jq -r '.paging.total // empty')
+            if [ -z "$N" ]; then
+              N=$(curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" \
+                "$SONAR_HOST/api/components/search_projects?organization=$KEY&ps=1" | jq -r '.paging.total // "n/a"')
+            fi
+            printf '%-40s %s\n' "$KEY" "$N"
+            case "$N" in ''|*[!0-9]*) ;; *) TOTAL=$((TOTAL + N)) ;; esac
+          done
+          echo
+          echo "::notice::Total organizations: $COUNT, total projects: $TOTAL"

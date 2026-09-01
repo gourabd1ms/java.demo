@@ -10,7 +10,7 @@ on:
 env:
   SONAR_HOST: https://sonarqube.us
   PROJECT_KEY: gourabd1ms_c.demo
-  PATTERN: (branch|release)-.*
+  PATTERN: (main|develop|release)-.*
 
 jobs:
   set-branch-pattern:
