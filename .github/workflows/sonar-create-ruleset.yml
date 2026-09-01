@@ -1,0 +1,56 @@
+name: Sonar - Create Java Ruleset
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/sonar-create-ruleset.yml'
+      - 'sonar/ruleset-java.xml'
+  workflow_dispatch: {}
+
+env:
+  SONAR_HOST: https://sonarqube.us
+  SONAR_ORG: gourabd1ms
+
+jobs:
+  create-ruleset:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xmlstarlet
+        run: sudo apt-get update -y && sudo apt-get install -y xmlstarlet
+
+      - name: Parse ruleset-java.xml
+        id: parse
+        run: |
+          echo "profile_name=$(xmlstarlet sel -t -v '/ruleset/profileName' sonar/ruleset-java.xml)" >> "$GITHUB_OUTPUT"
+          echo "language=$(xmlstarlet sel -t -v '/ruleset/language' sonar/ruleset-java.xml)" >> "$GITHUB_OUTPUT"
+
+      - name: Create quality profile via web API
+        id: create
+        run: |
+          RESP=$(curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+            "$SONAR_HOST/api/qualityprofiles/create" \
+            --data-urlencode "language=${{ steps.parse.outputs.language }}" \
+            --data-urlencode "name=${{ steps.parse.outputs.profile_name }}" \
+            --data-urlencode "organization=$SONAR_ORG")
+          echo "$RESP"
+          KEY=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('profile',{}).get('key',''))")
+          echo "profile_key=$KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Activate rules from ruleset-java.xml
+        run: |
+          PROFILE_KEY="${{ steps.create.outputs.profile_key }}"
+          if [ -z "$PROFILE_KEY" ]; then
+            echo "::error::Quality profile creation failed, cannot activate rules"
+            exit 1
+          fi
+          for RULE in $(xmlstarlet sel -t -v '/ruleset/rules/rule/@key' -n sonar/ruleset-java.xml); do
+            echo "Activating rule $RULE on profile $PROFILE_KEY"
+            curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+              "$SONAR_HOST/api/qualityprofiles/activate_rule" \
+              --data-urlencode "key=$PROFILE_KEY" \
+              --data-urlencode "rule=$RULE"
+            echo
+          done

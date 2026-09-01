@@ -1,0 +1,31 @@
+name: Sonar - Rename Main Branch to main1 (gourabd1ms_c.demo)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/sonar-branch-rename-main.yml'
+  workflow_dispatch: {}
+
+env:
+  SONAR_HOST: https://sonarqube.us
+  PROJECT_KEY: gourabd1ms_c.demo
+  NEW_NAME: main1
+
+jobs:
+  rename-main-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rename main branch via web API
+        run: |
+          HTTP_CODE=$(curl -s -o resp.json -w "%{http_code}" -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+            "$SONAR_HOST/api/project_branches/rename" \
+            --data-urlencode "project=$PROJECT_KEY" \
+            --data-urlencode "name=$NEW_NAME")
+          echo "HTTP status: $HTTP_CODE"
+          cat resp.json
+          if [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::Failed to rename main branch (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+          echo "::notice::Main branch of $PROJECT_KEY renamed to $NEW_NAME. Future CI pushes must target '$NEW_NAME' or they will create a new main branch."

@@ -1,0 +1,31 @@
+name: Sonar - Set Long-Lived Branch Pattern (gourabd1ms_c.demo)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/sonar-branch-longlived-pattern.yml'
+  workflow_dispatch: {}
+
+env:
+  SONAR_HOST: https://sonarqube.us
+  PROJECT_KEY: gourabd1ms_c.demo
+  PATTERN: (branch|release)-.*
+
+jobs:
+  set-branch-pattern:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set sonar.branch.longLivedBranches.regex via web API
+        run: |
+          HTTP_CODE=$(curl -s -o resp.json -w "%{http_code}" -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+            "$SONAR_HOST/api/settings/set" \
+            --data-urlencode "key=sonar.branch.longLivedBranches.regex" \
+            --data-urlencode "value=$PATTERN" \
+            --data-urlencode "component=$PROJECT_KEY")
+          echo "HTTP status: $HTTP_CODE"
+          cat resp.json
+          if [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::Failed to set long-lived branch pattern (HTTP $HTTP_CODE). Note: this setting may not exist on newer SonarQube/SonarCloud versions that auto-detect branch types."
+            exit 1
+          fi

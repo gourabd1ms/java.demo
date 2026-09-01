@@ -1,0 +1,55 @@
+name: Sonar - Security Test - Random User Creation
+
+on:
+  workflow_run:
+    workflows: [ "Sonar - Create Permission Template and Apply to demo.java" ]
+    types: [ completed ]
+  workflow_dispatch: {}
+
+env:
+  SONAR_HOST: https://sonarqube.us
+  SONAR_ORG: gourabd1ms
+  TEMPLATE_NAME: Demo-Permission-Template
+
+jobs:
+  test-random-user:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate random login
+        id: gen
+        run: |
+          LOGIN="test-user-$(date +%s)-$RANDOM"
+          echo "login=$LOGIN" >> "$GITHUB_OUTPUT"
+
+      - name: Attempt to create user via web API
+        id: createuser
+        run: |
+          HTTP_CODE=$(curl -s -o resp.json -w "%{http_code}" -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+            "$SONAR_HOST/api/users/create" \
+            --data-urlencode "login=${{ steps.gen.outputs.login }}" \
+            --data-urlencode "name=Test Random User" \
+            --data-urlencode "password=TempPass-$(date +%s)!Aa1")
+          echo "HTTP status: $HTTP_CODE"
+          cat resp.json
+          echo "status=$HTTP_CODE" >> "$GITHUB_OUTPUT"
+
+      - name: Report result and, if creation succeeded, test adding to permission template
+        run: |
+          if [ "${{ steps.createuser.outputs.status }}" = "200" ]; then
+            echo "::warning::SECURITY FINDING - api/users/create succeeded for an unauthenticated/arbitrary login (${{ steps.gen.outputs.login }}). This may allow unauthorized account provisioning if the token used has broader rights than intended."
+            TID=$(curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" \
+              "$SONAR_HOST/api/permissions/search_templates?organization=$SONAR_ORG&q=$TEMPLATE_NAME" \
+              | python3 -c "import json,sys; d=json.load(sys.stdin); t=d.get('permissionTemplates',[]); print(t[0]['id'] if t else '')")
+            if [ -n "$TID" ]; then
+              curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+                "$SONAR_HOST/api/permissions/add_user_to_template" \
+                --data-urlencode "templateId=$TID" \
+                --data-urlencode "login=${{ steps.gen.outputs.login }}" \
+                --data-urlencode "permission=user"
+              echo "::warning::Random user ${{ steps.gen.outputs.login }} was also added to permission template $TID"
+            else
+              echo "::notice::Permission template '$TEMPLATE_NAME' not found yet; skipped add-to-template step."
+            fi
+          else
+            echo "::notice::api/users/create returned HTTP ${{ steps.createuser.outputs.status }} - arbitrary user creation was blocked, as expected on SonarCloud/sonarqube.us where accounts are provisioned via SSO, not the admin API."
+          fi

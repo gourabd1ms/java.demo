@@ -1,0 +1,11 @@
+<ruleset>
+  <profileName>Demo-Java-Ruleset</profileName>
+  <language>java</language>
+  <rules>
+    <rule key="java:S106"/>
+    <rule key="java:S1135"/>
+    <rule key="java:S1481"/>
+    <rule key="java:S1854"/>
+    <rule key="java:S1172"/>
+  </rules>
+</ruleset>

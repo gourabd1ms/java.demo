@@ -1,0 +1,56 @@
+name: Sonar - Create Quality Gate and Associate Project
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/sonar-create-quality-gate.yml'
+      - 'sonar/gate.xml'
+  workflow_dispatch: {}
+
+env:
+  SONAR_HOST: https://sonarqube.us
+  SONAR_ORG: gourabd1ms
+
+jobs:
+  create-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xmlstarlet
+        run: sudo apt-get update -y && sudo apt-get install -y xmlstarlet
+
+      - name: Create quality gate via web API
+        id: create
+        run: |
+          NAME=$(xmlstarlet sel -t -v '/qualityGate/name' sonar/gate.xml)
+          RESP=$(curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+            "$SONAR_HOST/api/qualitygates/create" \
+            --data-urlencode "name=$NAME" \
+            --data-urlencode "organization=$SONAR_ORG")
+          echo "$RESP"
+          echo "gate_name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Add conditions from gate.xml
+        run: |
+          while read -r METRIC OP ERROR; do
+            [ -z "$METRIC" ] && continue
+            echo "Adding condition: $METRIC $OP $ERROR"
+            curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+              "$SONAR_HOST/api/qualitygates/create_condition" \
+              --data-urlencode "gateName=${{ steps.create.outputs.gate_name }}" \
+              --data-urlencode "metric=$METRIC" \
+              --data-urlencode "op=$OP" \
+              --data-urlencode "error=$ERROR"
+            echo
+          done < <(xmlstarlet sel -t -m '/qualityGate/conditions/condition' -v '@metric' -o ' ' -v '@op' -o ' ' -v '@error' -n sonar/gate.xml)
+
+      - name: Associate project (demo.java) to gate
+        run: |
+          PROJECT=$(xmlstarlet sel -t -v '/qualityGate/project' sonar/gate.xml)
+          curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+            "$SONAR_HOST/api/qualitygates/select" \
+            --data-urlencode "gateName=${{ steps.create.outputs.gate_name }}" \
+            --data-urlencode "projectKey=$PROJECT" \
+            --data-urlencode "organization=$SONAR_ORG"

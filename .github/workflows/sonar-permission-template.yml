@@ -1,0 +1,73 @@
+name: Sonar - Create Permission Template and Apply to demo.java
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/sonar-permission-template.yml'
+  workflow_dispatch: {}
+
+env:
+  SONAR_HOST: https://sonarqube.us
+  SONAR_ORG: gourabd1ms
+  TEMPLATE_NAME: Demo-Permission-Template
+  PROJECT_KEY: gourabd1ms_java.demo
+
+jobs:
+  permission-template:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create permission template via web API
+        id: create
+        run: |
+          RESP=$(curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+            "$SONAR_HOST/api/permissions/create_template" \
+            --data-urlencode "name=$TEMPLATE_NAME" \
+            --data-urlencode "description=Sample permission template for java.demo" \
+            --data-urlencode "organization=$SONAR_ORG")
+          echo "$RESP"
+          TID=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin)['permissionTemplate']['id'])")
+          if [ -z "$TID" ]; then
+            echo "::error::Permission template creation failed"
+            exit 1
+          fi
+          echo "template_id=$TID" >> "$GITHUB_OUTPUT"
+
+      - name: List organization members
+        run: |
+          curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" \
+            "$SONAR_HOST/api/organizations/search_members?organization=$SONAR_ORG&ps=500" \
+            -o members.json
+          cat members.json
+          jq -r '(.users // .members // [])[].login' members.json > logins.txt
+          cat logins.txt
+
+      - name: Add each member to the template
+        run: |
+          TID="${{ steps.create.outputs.template_id }}"
+          while read -r LOGIN; do
+            [ -z "$LOGIN" ] && continue
+            echo "Adding member $LOGIN to template $TID"
+            curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+              "$SONAR_HOST/api/permissions/add_user_to_template" \
+              --data-urlencode "templateId=$TID" \
+              --data-urlencode "login=$LOGIN" \
+              --data-urlencode "permission=user"
+            echo
+            curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+              "$SONAR_HOST/api/permissions/add_user_to_template" \
+              --data-urlencode "templateId=$TID" \
+              --data-urlencode "login=$LOGIN" \
+              --data-urlencode "permission=codeviewer"
+            echo
+          done < logins.txt
+
+      - name: Apply template to demo.java project
+        run: |
+          curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+            "$SONAR_HOST/api/permissions/apply_template" \
+            --data-urlencode "templateId=${{ steps.create.outputs.template_id }}" \
+            --data-urlencode "projectKey=$PROJECT_KEY" \
+            --data-urlencode "organization=$SONAR_ORG"
