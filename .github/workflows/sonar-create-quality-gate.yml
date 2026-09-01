@@ -21,7 +21,7 @@ jobs:
       - name: Install xmlstarlet
         run: sudo apt-get update -y && sudo apt-get install -y xmlstarlet
 
-      - name: Create quality gate via web API
+      - name: Create or look up quality gate
         id: create
         run: |
           NAME=$(xmlstarlet sel -t -v '/qualityGate/name' sonar/gate.xml)
@@ -29,28 +29,54 @@ jobs:
             "$SONAR_HOST/api/qualitygates/create" \
             --data-urlencode "name=$NAME" \
             --data-urlencode "organization=$SONAR_ORG")
-          echo "$RESP"
-          echo "gate_name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "create: $RESP"
+          GATE_ID=$(echo "$RESP" | jq -r '.id // empty')
+          if [ -z "$GATE_ID" ]; then
+            echo "Gate not created (likely already exists), looking it up"
+            GATE_ID=$(curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" \
+              "$SONAR_HOST/api/qualitygates/list?organization=$SONAR_ORG" \
+              | jq -r --arg n "$NAME" '.qualitygates[] | select(.name==$n) | .id')
+          fi
+          if [ -z "$GATE_ID" ]; then
+            echo "::error::Could not create or find quality gate $NAME"
+            exit 1
+          fi
+          echo "Using gate id $GATE_ID"
+          echo "gate_id=$GATE_ID" >> "$GITHUB_OUTPUT"
 
       - name: Add conditions from gate.xml
         run: |
+          GATE_ID="${{ steps.create.outputs.gate_id }}"
+          FAILED=0
           while read -r METRIC OP ERROR; do
             [ -z "$METRIC" ] && continue
             echo "Adding condition: $METRIC $OP $ERROR"
-            curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+            RESP=$(curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
               "$SONAR_HOST/api/qualitygates/create_condition" \
-              --data-urlencode "gateName=${{ steps.create.outputs.gate_name }}" \
+              --data-urlencode "gateId=$GATE_ID" \
+              --data-urlencode "organization=$SONAR_ORG" \
               --data-urlencode "metric=$METRIC" \
               --data-urlencode "op=$OP" \
-              --data-urlencode "error=$ERROR"
-            echo
+              --data-urlencode "error=$ERROR")
+            echo "$RESP"
+            if echo "$RESP" | grep -q '"errors"'; then FAILED=1; fi
           done < <(xmlstarlet sel -t -m '/qualityGate/conditions/condition' -v '@metric' -o ' ' -v '@op' -o ' ' -v '@error' -n sonar/gate.xml)
+          if [ "$FAILED" = "1" ]; then
+            echo "::error::One or more conditions could not be added"
+            exit 1
+          fi
 
       - name: Associate project (demo.java) to gate
         run: |
           PROJECT=$(xmlstarlet sel -t -v '/qualityGate/project' sonar/gate.xml)
-          curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
+          RESP=$(curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" -X POST \
             "$SONAR_HOST/api/qualitygates/select" \
-            --data-urlencode "gateName=${{ steps.create.outputs.gate_name }}" \
+            --data-urlencode "gateId=${{ steps.create.outputs.gate_id }}" \
             --data-urlencode "projectKey=$PROJECT" \
-            --data-urlencode "organization=$SONAR_ORG"
+            --data-urlencode "organization=$SONAR_ORG")
+          echo "$RESP"
+          if echo "$RESP" | grep -q '"errors"'; then
+            echo "::error::Failed to associate $PROJECT with the quality gate"
+            exit 1
+          fi
+          echo "::notice::Project $PROJECT associated with quality gate ${{ steps.create.outputs.gate_id }}"
