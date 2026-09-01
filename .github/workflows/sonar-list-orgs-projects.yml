@@ -18,10 +18,10 @@ jobs:
       - name: Probe enterprise/organization endpoints
         run: |
           for URL in \
-            "/api/enterprises/search" \
-            "/api/enterprises/organizations?enterprise=$ENTERPRISE" \
-            "/api/organizations/search?enterprise=$ENTERPRISE&ps=500" \
-            "/api/organizations/search?ps=500" \
+            "/api/v2/enterprises" \
+            "/api/v2/enterprises/$ENTERPRISE/organizations" \
+            "/api/v2/organizations" \
+            "/api/v2/enterprise-authentication/enterprises" \
             "/api/organizations/search?member=true&ps=500"; do
             echo "=== GET $URL"
             curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" "$SONAR_HOST$URL" | head -c 2000
@@ -31,9 +31,9 @@ jobs:
       - name: Collect org keys and count projects
         run: |
           for URL in \
-            "/api/enterprises/organizations?enterprise=$ENTERPRISE&ps=500" \
-            "/api/organizations/search?enterprise=$ENTERPRISE&ps=500" \
-            "/api/organizations/search?ps=500"; do
+            "/api/v2/enterprises/$ENTERPRISE/organizations" \
+            "/api/v2/organizations" \
+            "/api/organizations/search?member=true&ps=500"; do
             curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" "$SONAR_HOST$URL" -o orgs.json
             KEYS=$(jq -r '(.organizations // .organizationList // [])[].key' orgs.json 2>/dev/null)
             if [ -n "$KEYS" ]; then
