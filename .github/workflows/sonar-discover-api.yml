@@ -1,0 +1,38 @@
+name: Sonar - Discover Web API Endpoints
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/sonar-discover-api.yml'
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: 'Substring to filter endpoint paths (empty = list all)'
+        type: string
+        default: ''
+
+env:
+  SONAR_HOST: https://sonarqube.us
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dump web services (including internal)
+        run: |
+          curl -s -u "${{ secrets.SONAR_ENT_TOKEN }}:" \
+            "$SONAR_HOST/api/webservices/list?include_internals=true" -o ws.json
+          echo "Total web services: $(jq '.webServices | length' ws.json)"
+
+          echo
+          echo "=== Endpoints matching org / enterprise / project ==="
+          jq -r '.webServices[] | .path as $p | .actions[] |
+            "\($p)/\(.key)\tinternal=\(.internal)\tparams=\([.params[]?.key] | join(","))"' ws.json \
+            | grep -E "organization|enterprise|/projects/|components" || true
+
+          echo
+          echo "=== Full endpoint list (path/action, internal flag) ==="
+          FILTER="${{ inputs.filter }}"
+          jq -r '.webServices[] | .path as $p | .actions[] | "\($p)/\(.key)\tinternal=\(.internal)"' ws.json \
+            | { if [ -n "$FILTER" ]; then grep -i "$FILTER"; else cat; fi; }
