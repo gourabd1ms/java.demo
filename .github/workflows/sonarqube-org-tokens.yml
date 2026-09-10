@@ -44,6 +44,7 @@ on:
           - delete-resource-link
           - list-ip-allowlists
           - update-ip-allowlist
+          - list-webservices
       api_base:
         description: "API base URL"
         required: false
@@ -217,6 +218,20 @@ jobs:
               call PATCH "/ip-allowlists/${{ inputs.allowlist_id }}" \
                 -H "Content-Type: application/merge-patch+json" \
                 -d "$body"
+              ;;
+
+            list-webservices)
+              # Diagnostic only: SonarQube's classic, stable v1 endpoint that
+              # lists every registered web service action on this exact
+              # server -- used to confirm the real v2 path prefixes for the
+              # other operations above (the exported swagger docs only had a
+              # SwaggerHub mock basePath, not a real one). Deliberately
+              # hits a fixed host+path, not $API_BASE, so this operation
+              # can't be pointed at an arbitrary host via workflow inputs.
+              curl -sS -w '\nHTTP %{http_code}\n' \
+                -H "Authorization: Bearer ${SONARQUBE_API_TOKEN}" \
+                -H "Accept: application/json" \
+                "https://sonarqube.us/api/webservices/list"
               ;;
 
             *)
