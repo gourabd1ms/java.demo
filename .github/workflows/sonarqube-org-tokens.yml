@@ -1,0 +1,226 @@
+name: SonarQube Cloud - Organization Tokens (Authentication domain)
+
+# Explores the "API to access the Authentication domain" v2 API:
+#   POST   /token-definitions            createOrganizationToken
+#   GET    /token-definitions            listOrganizationTokens
+#   DELETE /token-definitions/{id}       deleteOrganizationToken
+#   POST   /token-resource-links         createTokenResourceLink   (associate a token with one project)
+#   GET    /token-resource-links         searchTokenResourceLinks
+#   DELETE /token-resource-links/{id}    deleteTokenResourceLink
+#   GET    /ip-allowlists                getIpAllowlists
+#   PATCH  /ip-allowlists/{id}           patchIpAllowlists
+#
+# ASSUMPTIONS (could not be verified live: sonarqube.us is blocked by our
+# corporate proxy policy from the environment this was authored in):
+#   - API base URL is https://sonarqube.us/api/v2 (override with the
+#     `api_base` input if this is wrong).
+#   - Auth is `Authorization: Bearer <token>`.
+#   - `resource_type` for a token-definition roleAssignment / a
+#     token-resource-link is one of ORGANIZATION | PROJECT (guessed from
+#     naming; not enumerated in the exported docs). Leaving `resource_id`
+#     empty on `create-token` creates a token scoped to the whole
+#     organization ("create sot for entire org" - no per-project binding);
+#     supplying `resource_id` additionally calls createTokenResourceLink to
+#     bind that token to one specific project.
+#   - `role` is a free-form string (e.g. "provisioning", "scan", "admin");
+#     confirm the exact set of valid values against your organization in
+#     the SonarQube Cloud admin UI before relying on this in automation.
+#
+# Requires repo secret: SONARQUBE_API_TOKEN
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Operation to run"
+        required: true
+        type: choice
+        options:
+          - list-tokens
+          - create-token
+          - delete-token
+          - list-resource-links
+          - create-resource-link
+          - delete-resource-link
+          - list-ip-allowlists
+          - update-ip-allowlist
+      api_base:
+        description: "API base URL"
+        required: false
+        default: "https://sonarqube.us/api/v2"
+      organization_id:
+        description: "Organization UUID (required for list-tokens, create-token, list-ip-allowlists)"
+        required: false
+      token_id:
+        description: "Organization token UUID (required for delete-token, list-resource-links, create-resource-link)"
+        required: false
+      token_name:
+        description: "Name for a new token (create-token)"
+        required: false
+        default: "gha-explore-token"
+      token_description:
+        description: "Description for a new token (create-token)"
+        required: false
+        default: "Created by the sonarqube-org-tokens.yml exploration workflow"
+      expires_at:
+        description: "Expiration, ISO 8601 (create-token; blank = no expiry)"
+        required: false
+      role:
+        description: "Role to grant the token, e.g. provisioning/scan/admin (create-token)"
+        required: false
+        default: "scan"
+      auto_grant_project_permissions:
+        description: "Auto-grant the token access to projects it creates (create-token)"
+        required: false
+        default: "false"
+      resource_id:
+        description: "Project UUID to bind the token to (create-token/create-resource-link; blank on create-token = org-wide token)"
+        required: false
+      resource_type:
+        description: "Resource type for the role assignment / resource link"
+        required: false
+        default: "PROJECT"
+      link_id:
+        description: "Token resource link UUID (delete-resource-link)"
+        required: false
+      enterprise_id:
+        description: "Enterprise UUID (list-ip-allowlists)"
+        required: false
+      allowlist_id:
+        description: "IP allowlist UUID (update-ip-allowlist)"
+        required: false
+      ip_ranges:
+        description: "Comma-separated IP ranges/CIDRs (update-ip-allowlist)"
+        required: false
+      page_index:
+        description: "Page index (list operations)"
+        required: false
+        default: "1"
+      page_size:
+        description: "Page size (list operations)"
+        required: false
+        default: "50"
+
+jobs:
+  explore:
+    runs-on: ubuntu-latest
+    env:
+      SONARQUBE_API_TOKEN: ${{ secrets.SONARQUBE_API_TOKEN }}
+      API_BASE: ${{ inputs.api_base }}
+    steps:
+      - name: Run selected operation
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SONARQUBE_API_TOKEN:-}" ]; then
+            echo "::error::Missing repo secret SONARQUBE_API_TOKEN"
+            exit 1
+          fi
+
+          call() {
+            method="$1"; path="$2"; shift 2
+            echo "---- $method $API_BASE$path ----"
+            curl -sS -w '\nHTTP %{http_code}\n' \
+              -X "$method" \
+              -H "Authorization: Bearer ${SONARQUBE_API_TOKEN}" \
+              -H "Accept: application/json" \
+              "$@" \
+              "$API_BASE$path"
+          }
+
+          op="${{ inputs.operation }}"
+
+          case "$op" in
+
+            list-tokens)
+              call GET "/token-definitions?organizationId=${{ inputs.organization_id }}&pageIndex=${{ inputs.page_index }}&pageSize=${{ inputs.page_size }}"
+              ;;
+
+            create-token)
+              # roleAssignments.resourceType=ORGANIZATION with no resource_id below
+              # yields an org-wide ("entire org") token; a non-empty resource_id
+              # instead binds a PROJECT-scoped role and is followed up with a
+              # createTokenResourceLink call to actually link the two records.
+              role_resource_type="${{ inputs.resource_type }}"
+              if [ -z "${{ inputs.resource_id }}" ]; then
+                role_resource_type="ORGANIZATION"
+              fi
+
+              body=$(jq -n \
+                --arg name "${{ inputs.token_name }}" \
+                --arg description "${{ inputs.token_description }}" \
+                --arg organizationId "${{ inputs.organization_id }}" \
+                --arg expiresAt "${{ inputs.expires_at }}" \
+                --arg resourceType "$role_resource_type" \
+                --arg role "${{ inputs.role }}" \
+                --argjson autoGrant "${{ inputs.auto_grant_project_permissions }}" \
+                '{
+                  name: $name,
+                  description: (if $description == "" then null else $description end),
+                  organizationId: $organizationId,
+                  expiresAt: (if $expiresAt == "" then null else $expiresAt end),
+                  autoGrantProjectPermissions: $autoGrant,
+                  roleAssignments: [
+                    { resourceType: $resourceType, roles: [$role] }
+                  ]
+                }')
+
+              response=$(call POST "/token-definitions" \
+                -H "Content-Type: application/json" \
+                -d "$body")
+              echo "$response"
+
+              if [ -n "${{ inputs.resource_id }}" ]; then
+                token_id=$(echo "$response" | sed -n '1,/^HTTP /p' | head -n -1 | jq -r '.id')
+                echo "---- binding new token $token_id to project ${{ inputs.resource_id }} ----"
+                link_body=$(jq -n \
+                  --arg organizationTokenId "$token_id" \
+                  --arg resourceType "${{ inputs.resource_type }}" \
+                  --arg resourceId "${{ inputs.resource_id }}" \
+                  '{organizationTokenId: $organizationTokenId, resourceType: $resourceType, resourceId: $resourceId}')
+                call POST "/token-resource-links" \
+                  -H "Content-Type: application/json" \
+                  -d "$link_body"
+              fi
+              ;;
+
+            delete-token)
+              call DELETE "/token-definitions/${{ inputs.token_id }}"
+              ;;
+
+            list-resource-links)
+              call GET "/token-resource-links?organizationTokenId=${{ inputs.token_id }}&resourceType=${{ inputs.resource_type }}&resourceId=${{ inputs.resource_id }}"
+              ;;
+
+            create-resource-link)
+              body=$(jq -n \
+                --arg organizationTokenId "${{ inputs.token_id }}" \
+                --arg resourceType "${{ inputs.resource_type }}" \
+                --arg resourceId "${{ inputs.resource_id }}" \
+                '{organizationTokenId: $organizationTokenId, resourceType: $resourceType, resourceId: $resourceId}')
+              call POST "/token-resource-links" \
+                -H "Content-Type: application/json" \
+                -d "$body"
+              ;;
+
+            delete-resource-link)
+              call DELETE "/token-resource-links/${{ inputs.link_id }}"
+              ;;
+
+            list-ip-allowlists)
+              call GET "/ip-allowlists?enterpriseId=${{ inputs.enterprise_id }}"
+              ;;
+
+            update-ip-allowlist)
+              body=$(jq -n --arg ranges "${{ inputs.ip_ranges }}" \
+                '{ipRanges: ($ranges | split(",") | map(gsub("^\\s+|\\s+$";"")))}')
+              call PATCH "/ip-allowlists/${{ inputs.allowlist_id }}" \
+                -H "Content-Type: application/merge-patch+json" \
+                -d "$body"
+              ;;
+
+            *)
+              echo "::error::Unknown operation: $op"
+              exit 1
+              ;;
+          esac
