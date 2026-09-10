@@ -1,0 +1,229 @@
+name: SonarQube Cloud - Users & Roles
+
+# Explores the "Users & Roles API" v2 API:
+#   GET    /users            searchUsers
+#   GET    /users/{id}       getUser
+#   GET    /groups           searchGroups
+#   POST   /groups           createGroup
+#   PATCH  /groups/{id}      patchGroup
+#   DELETE /groups/{id}      deleteGroup
+#   GET    /roles            getRoles          (list role assignments)
+#   POST   /roles            addRole           ("associate" a user/group/token with a project or org role)
+#   DELETE /roles/{id}       removeRole
+#   GET    /idp-group-mappings     listIdpGroupMappings
+#   POST   /idp-group-mappings     createIdpGroupMapping
+#   DELETE /idp-group-mappings/{id} deleteIdpGroupMapping
+#   GET    /idp-groups              listIdpGroups
+#
+# ASSUMPTIONS (could not be verified live: sonarqube.us is blocked by our
+# corporate proxy policy from the environment this was authored in):
+#   - API base URL is https://sonarqube.us/api/v2 (override with the
+#     `api_base` input if this is wrong).
+#   - Auth is `Authorization: Bearer <token>`.
+#   - `principal_type` enum is confirmed from the docs: user | group | organizationToken.
+#   - `resource_type` (for add-role/get-roles) and `role` are free-form
+#     strings in the schema; likely values mirror the classic SonarQube
+#     permission keys (user, codeviewer, issueadmin, securityhotspotadmin,
+#     admin, scan, provisioning) but confirm against your organization
+#     before relying on this in automation.
+#
+# Requires repo secret: SONARQUBE_API_TOKEN
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Operation to run"
+        required: true
+        type: choice
+        options:
+          - search-users
+          - get-user
+          - search-groups
+          - create-group
+          - patch-group
+          - delete-group
+          - get-roles
+          - add-role
+          - remove-role
+          - list-idp-group-mappings
+          - create-idp-group-mapping
+          - delete-idp-group-mapping
+          - list-idp-groups
+      api_base:
+        description: "API base URL"
+        required: false
+        default: "https://sonarqube.us/api/v2"
+      organization_id:
+        description: "Organization UUID"
+        required: false
+      user_id:
+        description: "User UUID (get-user)"
+        required: false
+      email:
+        description: "Email filter (search-users)"
+        required: false
+      q:
+        description: "Free-text search filter (search-users, search-groups, list-idp-groups)"
+        required: false
+      group_id:
+        description: "Group UUID (patch-group, delete-group)"
+        required: false
+      group_name:
+        description: "Group name (create-group, patch-group)"
+        required: false
+      group_description:
+        description: "Group description (create-group, patch-group)"
+        required: false
+      principal_id:
+        description: "Principal UUID: user/group/token id (add-role, get-roles)"
+        required: false
+      principal_type:
+        description: "user | group | organizationToken"
+        required: false
+        type: choice
+        options:
+          - user
+          - group
+          - organizationToken
+      resource_id:
+        description: "Resource UUID the role applies to, e.g. a project id (add-role, get-roles)"
+        required: false
+      resource_type:
+        description: "Resource type the role applies to, e.g. PROJECT or ORGANIZATION (add-role, get-roles)"
+        required: false
+        default: "PROJECT"
+      role:
+        description: "Role/permission key, e.g. scan/admin/provisioning (add-role, get-roles filter)"
+        required: false
+      role_id:
+        description: "Role assignment UUID (remove-role)"
+        required: false
+      idp_group_id:
+        description: "IdP group UUID (create-idp-group-mapping)"
+        required: false
+      idp_mapping_id:
+        description: "IdP group mapping UUID (delete-idp-group-mapping)"
+        required: false
+      enterprise_id:
+        description: "Enterprise UUID (list-idp-group-mappings, list-idp-groups)"
+        required: false
+      page_index:
+        description: "Page index (list/search operations)"
+        required: false
+        default: "1"
+      page_size:
+        description: "Page size (list/search operations)"
+        required: false
+        default: "50"
+
+jobs:
+  explore:
+    runs-on: ubuntu-latest
+    env:
+      SONARQUBE_API_TOKEN: ${{ secrets.SONARQUBE_API_TOKEN }}
+      API_BASE: ${{ inputs.api_base }}
+    steps:
+      - name: Run selected operation
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SONARQUBE_API_TOKEN:-}" ]; then
+            echo "::error::Missing repo secret SONARQUBE_API_TOKEN"
+            exit 1
+          fi
+
+          call() {
+            method="$1"; path="$2"; shift 2
+            echo "---- $method $API_BASE$path ----"
+            curl -sS -w '\nHTTP %{http_code}\n' \
+              -X "$method" \
+              -H "Authorization: Bearer ${SONARQUBE_API_TOKEN}" \
+              -H "Accept: application/json" \
+              "$@" \
+              "$API_BASE$path"
+          }
+
+          op="${{ inputs.operation }}"
+
+          case "$op" in
+
+            search-users)
+              call GET "/users?organizationIds=${{ inputs.organization_id }}&email=${{ inputs.email }}&q=${{ inputs.q }}&pageIndex=${{ inputs.page_index }}&pageSize=${{ inputs.page_size }}"
+              ;;
+
+            get-user)
+              call GET "/users/${{ inputs.user_id }}"
+              ;;
+
+            search-groups)
+              call GET "/groups?organizationIds=${{ inputs.organization_id }}&q=${{ inputs.q }}&pageIndex=${{ inputs.page_index }}&pageSize=${{ inputs.page_size }}"
+              ;;
+
+            create-group)
+              body=$(jq -n \
+                --arg organizationId "${{ inputs.organization_id }}" \
+                --arg name "${{ inputs.group_name }}" \
+                --arg description "${{ inputs.group_description }}" \
+                '{organizationId: $organizationId, name: $name, description: (if $description == "" then null else $description end)}')
+              call POST "/groups" -H "Content-Type: application/json" -d "$body"
+              ;;
+
+            patch-group)
+              body=$(jq -n \
+                --arg name "${{ inputs.group_name }}" \
+                --arg description "${{ inputs.group_description }}" \
+                '{}
+                 + (if $name == "" then {} else {name: $name} end)
+                 + (if $description == "" then {} else {description: $description} end)')
+              call PATCH "/groups/${{ inputs.group_id }}" -H "Content-Type: application/merge-patch+json" -d "$body"
+              ;;
+
+            delete-group)
+              call DELETE "/groups/${{ inputs.group_id }}"
+              ;;
+
+            get-roles)
+              call GET "/roles?resourceType=${{ inputs.resource_type }}&resourceId=${{ inputs.resource_id }}&principalIds=${{ inputs.principal_id }}&principalType=${{ inputs.principal_type }}&role=${{ inputs.role }}&pageIndex=${{ inputs.page_index }}&pageSize=${{ inputs.page_size }}"
+              ;;
+
+            add-role)
+              body=$(jq -n \
+                --arg principalId "${{ inputs.principal_id }}" \
+                --arg principalType "${{ inputs.principal_type }}" \
+                --arg resourceId "${{ inputs.resource_id }}" \
+                --arg resourceType "${{ inputs.resource_type }}" \
+                --arg role "${{ inputs.role }}" \
+                '{principalId: $principalId, principalType: $principalType, resourceId: $resourceId, resourceType: $resourceType, role: $role}')
+              call POST "/roles" -H "Content-Type: application/json" -d "$body"
+              ;;
+
+            remove-role)
+              call DELETE "/roles/${{ inputs.role_id }}"
+              ;;
+
+            list-idp-group-mappings)
+              call GET "/idp-group-mappings?organizationId=${{ inputs.organization_id }}&enterpriseId=${{ inputs.enterprise_id }}"
+              ;;
+
+            create-idp-group-mapping)
+              body=$(jq -n \
+                --arg organizationId "${{ inputs.organization_id }}" \
+                --arg idpGroupId "${{ inputs.idp_group_id }}" \
+                '{organizationId: $organizationId, idpGroupId: $idpGroupId}')
+              call POST "/idp-group-mappings" -H "Content-Type: application/json" -d "$body"
+              ;;
+
+            delete-idp-group-mapping)
+              call DELETE "/idp-group-mappings/${{ inputs.idp_mapping_id }}"
+              ;;
+
+            list-idp-groups)
+              call GET "/idp-groups?enterpriseId=${{ inputs.enterprise_id }}&q=${{ inputs.q }}"
+              ;;
+
+            *)
+              echo "::error::Unknown operation: $op"
+              exit 1
+              ;;
+          esac
