@@ -1,0 +1,140 @@
+name: Sonar SOT - API Probe (discovery)
+
+# Discovery harness for SonarQube Cloud (US region) Scoped Organization Tokens.
+#
+# Nothing here is assumed. It probes candidate hosts/paths and reports the
+# status code + first bytes of each response, so the *next* workflow can be
+# written against endpoints that are known to exist.
+#
+# Evidence this was built from (previous runs of sonarqube-org-tokens.yml):
+#   sonarqube.us/token-definitions      -> SPA HTML  (no such route)
+#   sonarqube.us/api/token-definitions  -> 404 {"errors":[{"msg":"Unknown url : ..."}]}
+#   api.sonarqube.us/<junk>             -> 403 {"message":"Forbidden"}  <-- real gateway
+#
+# Reads existing repo secrets; creates nothing and deletes nothing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      org_key:
+        description: "Organization key"
+        type: string
+        default: "gourabd1ms"
+
+env:
+  WEB_HOST: https://sonarqube.us
+  API_HOST: https://api.sonarqube.us
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Which secret authenticates?
+        env:
+          T_API: ${{ secrets.SONARQUBE_API_TOKEN }}
+          T_ENT: ${{ secrets.SONAR_ENT_TOKEN }}
+          T_STD: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          echo "## Credential check" >> "$GITHUB_STEP_SUMMARY"
+          echo '| secret | /api/authentication/validate | /api/users/current |' >> "$GITHUB_STEP_SUMMARY"
+          echo '|---|---|---|' >> "$GITHUB_STEP_SUMMARY"
+          for name in T_API T_ENT T_STD; do
+            tok="${!name}"
+            if [ -z "$tok" ]; then
+              echo "| $name | (not set) | - |" >> "$GITHUB_STEP_SUMMARY"; continue
+            fi
+            v=$(curl -s -o /dev/null -w '%{http_code}' -u "$tok:" "$WEB_HOST/api/authentication/validate")
+            vb=$(curl -s -u "$tok:" "$WEB_HOST/api/authentication/validate" | head -c 60)
+            u=$(curl -s -o /dev/null -w '%{http_code}' -u "$tok:" "$WEB_HOST/api/users/current")
+            echo "| $name | $v \`$vb\` | $u |" >> "$GITHUB_STEP_SUMMARY"
+            echo "SECRET $name -> validate=$v body=$vb current=$u"
+          done
+
+      - name: Identity and organization UUID
+        env:
+          TOKEN: ${{ secrets.SONARQUBE_API_TOKEN }}
+        run: |
+          echo "== users/current =="
+          curl -s -u "$TOKEN:" "$WEB_HOST/api/users/current" | tee cur.json | head -c 1200; echo
+          echo "== organizations/search?member=true =="
+          curl -s -u "$TOKEN:" "$WEB_HOST/api/organizations/search?member=true" | tee orgs.json | head -c 2000; echo
+          echo "== organizations/search?organizations=${{ inputs.org_key }} =="
+          curl -s -u "$TOKEN:" "$WEB_HOST/api/organizations/search?organizations=${{ inputs.org_key }}" | head -c 2000; echo
+
+      - name: Enumerate v1 web services, filtered for token/org
+        env:
+          TOKEN: ${{ secrets.SONARQUBE_API_TOKEN }}
+        run: |
+          curl -s -u "$TOKEN:" "$WEB_HOST/api/webservices/list?include_internals=true" -o ws.json
+          echo "total services: $(jq '.webServices | length' ws.json)"
+          echo
+          echo "=== actions matching token|scope|organization ==="
+          jq -r '.webServices[] | .path as $p | .actions[] |
+                 "\($p)/\(.key)\tPOST=\(.post)\tinternal=\(.internal)\tparams=\([.params[]?.key]|join(","))"' ws.json \
+            | grep -Ei "token|scope|organization" | sort | tee token_actions.txt
+          echo
+          echo "count: $(wc -l < token_actions.txt)"
+
+      - name: Probe candidate v2 / scoped-token endpoints
+        env:
+          TOKEN: ${{ secrets.SONARQUBE_API_TOKEN }}
+        run: |
+          ORG_KEY="${{ inputs.org_key }}"
+          ORG_UUID=$(jq -r '.organizations[0].id // empty' orgs.json 2>/dev/null || true)
+          echo "org key=$ORG_KEY uuid=${ORG_UUID:-<none>}"
+          echo
+          echo "## Endpoint probe" >> "$GITHUB_STEP_SUMMARY"
+          echo '| method | url | auth | status | body (120b) |' >> "$GITHUB_STEP_SUMMARY"
+          echo '|---|---|---|---|---|' >> "$GITHUB_STEP_SUMMARY"
+
+          probe() {
+            m="$1"; url="$2"; auth="$3"
+            if [ "$auth" = bearer ]; then
+              hdr=(-H "Authorization: Bearer $TOKEN")
+            else
+              hdr=(-u "$TOKEN:")
+            fi
+            code=$(curl -s -o body.tmp -w '%{http_code}' -X "$m" "${hdr[@]}" -H 'Accept: application/json' "$url")
+            snip=$(head -c 120 body.tmp | tr '\n' ' ' | tr '|' '/' | sed 's/<!doctype html>.*/[SPA HTML]/I')
+            printf '%-6s %-70s %-6s %s  %s\n' "$m" "$url" "$auth" "$code" "$snip"
+            echo "| $m | \`$url\` | $auth | $code | \`$snip\` |" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          echo "--------- v2 bases ---------"
+          for auth in bearer basic; do
+            probe GET "$API_HOST/v2/token-definitions" $auth
+            probe GET "$API_HOST/token-definitions" $auth
+            probe GET "$WEB_HOST/api/v2/token-definitions" $auth
+          done
+
+          echo "--------- scoped-tokens variants (the suggested shape) ---------"
+          probe GET  "$WEB_HOST/api/v2/organizations/$ORG_KEY/scoped-tokens" bearer
+          probe GET  "$API_HOST/v2/organizations/$ORG_KEY/scoped-tokens"     bearer
+          probe GET  "$API_HOST/organizations/$ORG_KEY/scoped-tokens"        bearer
+          probe GET  "$WEB_HOST/api/organizations/$ORG_KEY/scoped-tokens"    bearer
+          probe GET  "$WEB_HOST/api/scoped-tokens?organization=$ORG_KEY"     bearer
+          if [ -n "$ORG_UUID" ]; then
+            probe GET "$API_HOST/v2/organizations/$ORG_UUID/scoped-tokens"   bearer
+            probe GET "$API_HOST/v2/token-definitions?organizationId=$ORG_UUID" bearer
+            probe GET "$WEB_HOST/api/v2/token-definitions?organizationId=$ORG_UUID" bearer
+          fi
+
+          echo "--------- v2 discovery / openapi ---------"
+          for u in "$API_HOST/v2/openapi" "$API_HOST/openapi" "$WEB_HOST/api/v2/openapi" \
+                   "$WEB_HOST/api/v2" "$API_HOST/v2" "$API_HOST/" ; do
+            probe GET "$u" bearer
+          done
+
+          echo "--------- classic user_tokens (known-good control) ---------"
+          probe GET "$WEB_HOST/api/user_tokens/search" basic
+
+      - name: Upload raw responses
+        uses: actions/upload-artifact@v4
+        with:
+          name: sot-probe-output
+          path: |
+            ws.json
+            orgs.json
+            cur.json
+            token_actions.txt
+          if-no-files-found: warn
