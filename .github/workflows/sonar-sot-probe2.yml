@@ -1,0 +1,117 @@
+name: Sonar SOT - Probe 2 (mine the SPA bundles)
+
+# Probe 1 established, against https://sonarqube.us:
+#   /api/v2                                      -> 404 Unknown url   (no v2 surface at all)
+#   /api/v2/token-definitions                    -> 404 Unknown url
+#   /api/{v2/,}organizations/<org>/scoped-tokens -> 404 Unknown url
+#   /api/scoped-tokens                           -> 404 Unknown url
+#   /api/user_tokens/{generate,revoke,search}    -> 200  (only 3 actions; no org/project scoping params)
+#   api.sonarqube.us/*                           -> 403; one path returned an AWS SigV4
+#                                                   "Invalid key=value pair" error => AWS API Gateway
+#   /api/webservices/list is FILTERED: api/organizations is absent from it yet
+#   /api/organizations/search returns 200. So absence from the catalog proves nothing.
+#
+# Therefore: find what the web UI itself calls. The SPA's JS bundles contain
+# every API path the front end uses, including internal ones missing from the
+# catalog. Read-only: downloads public JS and issues GETs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      org_key:
+        description: "Organization key"
+        type: string
+        default: "gourabd1ms"
+
+env:
+  WEB_HOST: https://sonarqube.us
+
+jobs:
+  mine:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download SPA bundles and extract every API path
+        run: |
+          set -uo pipefail
+          curl -s "$WEB_HOST/" -o index.html
+          echo "index.html bytes: $(wc -c < index.html)"
+
+          # every /xxx.js referenced by the shell page
+          grep -oE '/[A-Za-z0-9._-]+\.js' index.html | sort -u > chunks.txt
+          echo "chunks referenced by index.html: $(wc -l < chunks.txt)"
+          cat chunks.txt
+
+          mkdir -p js
+          while read -r c; do
+            f="js/$(basename "$c")"
+            curl -s "$WEB_HOST$c" -o "$f"
+          done < chunks.txt
+
+          # main bundle lazy-loads more chunks by literal name; pull those too
+          grep -ohoE '"[A-Za-z0-9._-]+\.js"' js/*.js 2>/dev/null | tr -d '"' | sort -u > more.txt || true
+          echo "additional chunk names found inside bundles: $(wc -l < more.txt)"
+          while read -r c; do
+            [ -f "js/$c" ] && continue
+            curl -s -f "$WEB_HOST/$c" -o "js/$c" 2>/dev/null || rm -f "js/$c"
+          done < more.txt
+          echo "total js downloaded: $(ls js | wc -l)  ($(du -sh js | cut -f1))"
+
+          echo
+          echo "=== every api/... string across all bundles ==="
+          grep -ohoE '(/?api/v[0-9]+/[A-Za-z0-9._/-]+|/?api/[A-Za-z0-9._/-]+)' js/*.js \
+            | sed 's#^/##' | sort -u > api_paths.txt
+          echo "unique api paths: $(wc -l < api_paths.txt)"
+
+          echo
+          echo "=== paths matching token / scope / organization ==="
+          grep -Ei 'token|scope|organi' api_paths.txt | tee interesting.txt
+          echo "(count: $(wc -l < interesting.txt))"
+
+          echo
+          echo "=== any v2 paths at all ==="
+          grep -E '^api/v[0-9]' api_paths.txt | tee v2_paths.txt || echo "(none)"
+          echo "(count: $(wc -l < v2_paths.txt))"
+
+      - name: Probe every token/org path the UI references
+        env:
+          TOKEN: ${{ secrets.SONARQUBE_API_TOKEN }}
+        run: |
+          set -uo pipefail
+          ORG="${{ inputs.org_key }}"
+          echo "## UI-derived endpoint probe" >> "$GITHUB_STEP_SUMMARY"
+          echo '| url | status | body (140b) |' >> "$GITHUB_STEP_SUMMARY"
+          echo '|---|---|---|' >> "$GITHUB_STEP_SUMMARY"
+
+          probe() {
+            url="$1"
+            code=$(curl -s -o b.tmp -w '%{http_code}' -u "$TOKEN:" -H 'Accept: application/json' "$url")
+            snip=$(head -c 140 b.tmp | tr '\n' ' ' | tr '|' '/' | sed 's/<!doctype html>.*/[SPA HTML]/I')
+            printf '%-74s %s  %s\n' "$url" "$code" "$snip"
+            echo "| \`$url\` | $code | \`$snip\` |" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          echo "--- paths the UI itself references (token/scope/org) ---"
+          while read -r p; do
+            [ -z "$p" ] && continue
+            case "$p" in *'${'*|*'"'*) continue;; esac
+            probe "$WEB_HOST/$p"
+            probe "$WEB_HOST/$p?organization=$ORG"
+          done < interesting.txt
+
+          echo
+          echo "--- any v2 paths the UI references ---"
+          while read -r p; do
+            [ -z "$p" ] && continue
+            probe "$WEB_HOST/$p"
+          done < v2_paths.txt
+
+      - name: Upload extracted path lists
+        uses: actions/upload-artifact@v4
+        with:
+          name: sot-probe2-paths
+          path: |
+            api_paths.txt
+            interesting.txt
+            v2_paths.txt
+            chunks.txt
+          if-no-files-found: warn
