@@ -49,10 +49,11 @@ jobs:
     steps:
       - name: Resolve token
         run: |
+          set +e
           set -uo pipefail
           TOKEN="${SONAR_ENT_TOKEN:-}"
-          [ -z "$TOKEN" ] && TOKEN="${SONARQUBE_API_TOKEN:-}"
-          [ -z "$TOKEN" ] && TOKEN="${SONAR_TOKEN:-}"
+          if [ -z "$TOKEN" ]; then TOKEN="${SONARQUBE_API_TOKEN:-}"; fi
+          if [ -z "$TOKEN" ]; then TOKEN="${SONAR_TOKEN:-}"; fi
           if [ -z "$TOKEN" ]; then
             echo "::error::No Sonar token found. Set repo secret SONAR_ENT_TOKEN (or SONARQUBE_API_TOKEN / SONAR_TOKEN)."
             exit 1
@@ -62,6 +63,7 @@ jobs:
 
       - name: Sanity check - classic v1 auth works at all
         run: |
+          set +e
           set -uo pipefail
           echo "--- GET /api/authentication/validate (basic) ---"
           curl -sS -u "$TOKEN:" "$WEB_HOST/api/authentication/validate" -w '\nHTTP %{http_code}\n'
@@ -77,6 +79,7 @@ jobs:
 
       - name: Probe v2 base x path x auth matrix
         run: |
+          set +e
           set -uo pipefail
 
           BASES="
@@ -146,6 +149,7 @@ jobs:
       - name: Try to fetch an OpenAPI document
         if: ${{ inputs.dump_openapi }}
         run: |
+          set +e
           set -uo pipefail
           for u in \
             "https://sonarqube.us/api/v2/api-docs" \
@@ -166,6 +170,7 @@ jobs:
 
       - name: Cross-check the classic web service catalog for user endpoints
         run: |
+          set +e
           set -uo pipefail
           curl -sS -u "$TOKEN:" "$WEB_HOST/api/webservices/list?include_internals=true" -o ws.json -w 'HTTP %{http_code}\n'
           echo "=== user/group related v1 endpoints (fallback if v2 is absent) ==="
@@ -175,12 +180,14 @@ jobs:
 
       - name: Probe v1 user endpoints (the fallback surface)
         run: |
+          set +e
           set -uo pipefail
           v1() {
             path="$1"
             code=$(curl -sS -o b.out -w '%{http_code}' --max-time 25 -u "$TOKEN:" "$WEB_HOST$path" || echo 000)
             printf '%-62s %s\n' "$path" "$code"
-            [ "$code" = "200" ] && head -c 300 b.out | tr '\n' ' ' && echo
+            if [ "$code" = "200" ]; then head -c 300 b.out | tr '\n' ' '; echo; fi
+            return 0
           }
           v1 "/api/users/search?q=gourabd1ms"
           v1 "/api/users/search?organization=$ORG_KEY&q=gourabd1ms"

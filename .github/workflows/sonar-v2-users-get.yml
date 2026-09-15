@@ -59,10 +59,11 @@ jobs:
     steps:
       - name: Resolve token
         run: |
+          set +e
           set -uo pipefail
           TOKEN="${SONAR_ENT_TOKEN:-}"
-          [ -z "$TOKEN" ] && TOKEN="${SONARQUBE_API_TOKEN:-}"
-          [ -z "$TOKEN" ] && TOKEN="${SONAR_TOKEN:-}"
+          if [ -z "$TOKEN" ]; then TOKEN="${SONARQUBE_API_TOKEN:-}"; fi
+          if [ -z "$TOKEN" ]; then TOKEN="${SONAR_TOKEN:-}"; fi
           if [ -z "$TOKEN" ]; then
             echo "::error::No Sonar token found. Set repo secret SONAR_ENT_TOKEN (or SONARQUBE_API_TOKEN / SONAR_TOKEN)."
             exit 1
@@ -72,6 +73,7 @@ jobs:
 
       - name: Validate inputs
         run: |
+          set +e
           set -uo pipefail
           if [ -z "$USER_ID" ] && [ -z "$LOGIN_OR_EMAIL" ]; then
             echo "::error::Provide either user_id or login_or_email."
@@ -80,6 +82,7 @@ jobs:
 
       - name: Resolve organization UUID
         run: |
+          set +e
           set -uo pipefail
           if [ -n "$ORG_ID" ]; then
             echo "ORG_ID=$ORG_ID" >> "$GITHUB_ENV"
@@ -94,6 +97,7 @@ jobs:
       - name: Resolve UUID from login/email
         if: ${{ inputs.user_id == '' }}
         run: |
+          set +e
           set -uo pipefail
           QS=$(python3 - <<'PY'
           import os, urllib.parse
@@ -127,6 +131,7 @@ jobs:
 
       - name: Get user
         run: |
+          set +e
           set -uo pipefail
           URL="${API_BASE}${USERS_PATH}/${USER_ID}"
           echo "---- GET $URL ----"

@@ -114,10 +114,11 @@ jobs:
     steps:
       - name: Resolve token
         run: |
+          set +e
           set -uo pipefail
           TOKEN="${SONAR_ENT_TOKEN:-}"
-          [ -z "$TOKEN" ] && TOKEN="${SONARQUBE_API_TOKEN:-}"
-          [ -z "$TOKEN" ] && TOKEN="${SONAR_TOKEN:-}"
+          if [ -z "$TOKEN" ]; then TOKEN="${SONARQUBE_API_TOKEN:-}"; fi
+          if [ -z "$TOKEN" ]; then TOKEN="${SONAR_TOKEN:-}"; fi
           if [ -z "$TOKEN" ]; then
             echo "::error::No Sonar token found. Set repo secret SONAR_ENT_TOKEN (or SONARQUBE_API_TOKEN / SONAR_TOKEN)."
             exit 1
@@ -127,6 +128,7 @@ jobs:
 
       - name: Resolve organization UUID
         run: |
+          set +e
           set -uo pipefail
           if [ -n "$ORG_ID" ]; then
             echo "Using supplied organization UUID: $ORG_ID"
@@ -141,6 +143,7 @@ jobs:
 
       - name: Search users
         run: |
+          set +e
           set -uo pipefail
 
           # Build the query string, skipping empty filters so we never send

@@ -88,10 +88,11 @@ jobs:
     steps:
       - name: Resolve token
         run: |
+          set +e
           set -uo pipefail
           TOKEN="${SONAR_ENT_TOKEN:-}"
-          [ -z "$TOKEN" ] && TOKEN="${SONARQUBE_API_TOKEN:-}"
-          [ -z "$TOKEN" ] && TOKEN="${SONAR_TOKEN:-}"
+          if [ -z "$TOKEN" ]; then TOKEN="${SONARQUBE_API_TOKEN:-}"; fi
+          if [ -z "$TOKEN" ]; then TOKEN="${SONAR_TOKEN:-}"; fi
           if [ -z "$TOKEN" ]; then
             echo "::error::No Sonar token found. Set repo secret SONAR_ENT_TOKEN (or SONARQUBE_API_TOKEN / SONAR_TOKEN)."
             exit 1
@@ -101,6 +102,7 @@ jobs:
 
       - name: Guard - refuse to delete the token's own account
         run: |
+          set +e
           set -uo pipefail
           curl -sS -u "$TOKEN:" "$WEB_HOST/api/users/current" -o me.json -w 'users/current -> HTTP %{http_code}\n'
           ME=$(jq -r '.login // empty' me.json)
@@ -112,6 +114,7 @@ jobs:
 
       - name: Resolve organization UUID
         run: |
+          set +e
           set -uo pipefail
           if [ -n "$ORG_ID" ]; then
             echo "ORG_ID=$ORG_ID" >> "$GITHUB_ENV"
@@ -125,6 +128,7 @@ jobs:
 
       - name: Resolve target user
         run: |
+          set +e
           set -uo pipefail
           if [ -n "$USER_ID" ]; then
             URL="${API_BASE}${USERS_PATH}/${USER_ID}"
@@ -176,10 +180,11 @@ jobs:
       - name: Dry run - stop before deleting
         if: ${{ inputs.dry_run }}
         run: |
+          set +e
           set -uo pipefail
           if [ "$MODE" = "v2-delete" ]; then
             SUFFIX=""
-            [ "$ANONYMIZE" = "true" ] && SUFFIX="?anonymize=true"
+            if [ "$ANONYMIZE" = "true" ]; then SUFFIX="?anonymize=true"; fi
             echo "DRY RUN - would issue: DELETE ${API_BASE}${USERS_PATH}/${TARGET_ID}${SUFFIX}"
           else
             echo "DRY RUN - would issue: POST $WEB_HOST/api/organizations/remove_member (organization=$ORG_KEY, login=$TARGET_LOGIN)"
@@ -193,10 +198,11 @@ jobs:
       - name: Delete user
         if: ${{ !inputs.dry_run }}
         run: |
+          set +e
           set -uo pipefail
           if [ "$MODE" = "v2-delete" ]; then
             SUFFIX=""
-            [ "$ANONYMIZE" = "true" ] && SUFFIX="?anonymize=true"
+            if [ "$ANONYMIZE" = "true" ]; then SUFFIX="?anonymize=true"; fi
             URL="${API_BASE}${USERS_PATH}/${TARGET_ID}${SUFFIX}"
             echo "---- DELETE $URL ----"
             CODE=$(curl -sS -o resp.json -w '%{http_code}' --max-time 60 -X DELETE \
@@ -229,6 +235,7 @@ jobs:
       - name: Verify the user is gone
         if: ${{ !inputs.dry_run }}
         run: |
+          set +e
           set -uo pipefail
           URL="${API_BASE}${USERS_PATH}/${TARGET_ID}"
           CODE=$(curl -sS -o after.json -w '%{http_code}' --max-time 60 \
