@@ -173,6 +173,24 @@ jobs:
             "\($p)/\(.key)\tinternal=\(.internal)\tparams=\([.params[]?.key] | join(","))"' ws.json \
             | grep -iE "user|group|member|permission" || echo "(no matches)"
 
+      - name: Probe v1 user endpoints (the fallback surface)
+        run: |
+          set -uo pipefail
+          v1() {
+            path="$1"
+            code=$(curl -sS -o b.out -w '%{http_code}' --max-time 25 -u "$TOKEN:" "$WEB_HOST$path" || echo 000)
+            printf '%-62s %s\n' "$path" "$code"
+            [ "$code" = "200" ] && head -c 300 b.out | tr '\n' ' ' && echo
+          }
+          v1 "/api/users/search?q=gourabd1ms"
+          v1 "/api/users/search?organization=$ORG_KEY&q=gourabd1ms"
+          v1 "/api/organizations/search_members?organization=$ORG_KEY&ps=50"
+          v1 "/api/users/groups?login=gourabd1ms-BXUpq@github&organization=$ORG_KEY"
+          v1 "/api/user_groups/users?organization=$ORG_KEY&name=Members&ps=50"
+          v1 "/api/users/deactivate"
+          v1 "/api/organizations/remove_member"
+          v1 "/api/organizations/add_member"
+
       - name: Upload probe artifacts
         if: always()
         uses: actions/upload-artifact@v4
