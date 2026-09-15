@@ -1,72 +1,78 @@
 name: Sonar v2 - Users API - Delete
 
-# DELETE {api_base}/users-management/users/{id}[?anonymize=true]  (deleteUser)
+# deleteUser. DESTRUCTIVE.
 #
-# DESTRUCTIVE. In SonarQube's v2 users API a DELETE deactivates the account
-# and, with anonymize=true, also scrubs its personal data - neither is
-# reversible. Guard rails in this workflow:
-#   * dry_run defaults to true - it resolves and shows the target, then stops.
-#   * confirm_login must exactly equal the login of the resolved user before
-#     any DELETE is issued.
-#   * the target is always fetched and printed before it is deleted.
+# Primary surface (v2):
+#   DELETE {api_base}/users-management/users/{id}[?anonymize=true]
+# which deactivates the account and, with anonymize, scrubs its personal
+# data. Neither is reversible.
 #
-# On SonarQube Cloud an "account" is global and org membership is separate, so
-# the v2 delete may be refused for the tenant. Set mode=org-remove-member to
-# use the classic POST /api/organizations/remove_member instead, which drops
-# the user from the organization without touching their global account.
+# MEASURED on this tenant (run 34922690963, sonar-v2-users-discover.yml):
+# https://sonarqube.us/api/v2/* answers 404 throughout, and on SonarQube
+# Cloud an account is global while org membership is separate. The v1
+# fallback therefore removes the user from the organization only:
+#   POST /api/organizations/remove_member (organization, login)
+# (GET on that path returns 405, i.e. it exists and is POST-only.)
+# It does not touch their global Sonar account - which is the correct and
+# only available action for a Cloud organization.
 #
-# Run sonar-v2-users-discover.yml first if `api_base` is unproven.
+# Guard rails:
+#   * dry_run defaults to true - resolves and shows the target, then stops.
+#   * confirm_login must exactly equal the resolved user's login.
+#   * refuses to act on the account that owns the API token.
+#   * the target record is always printed before anything is removed.
 
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: "v2-delete = DELETE the account; org-remove-member = only remove from the organization"
+      confirm_login:
+        description: "Type the exact login of the user to remove (safety check)"
         required: true
-        type: choice
-        options:
-          - v2-delete
-          - org-remove-member
-        default: v2-delete
+        type: string
       dry_run:
         description: "Resolve and display the target without deleting"
         required: true
         type: boolean
         default: true
-      confirm_login:
-        description: "Type the exact login of the user to delete (safety check)"
+      mode:
+        description: "auto = v2 delete if present else v1 org removal; or force one"
         required: true
-        type: string
-      user_id:
-        description: "User UUID. Leave empty to resolve from confirm_login."
-        required: false
-        type: string
-        default: ""
+        type: choice
+        options:
+          - auto
+          - v2-delete
+          - org-remove-member
+        default: auto
       anonymize:
         description: "Also anonymize personal data (v2-delete only)"
         required: false
         type: boolean
         default: false
+      org_key:
+        description: "Organization key"
+        required: false
+        type: string
+        default: "gourabd1ms"
+      user_id:
+        description: "User UUID (v2 only). Leave empty to resolve from confirm_login."
+        required: false
+        type: string
+        default: ""
       api_base:
         description: "v2 API base URL"
         required: false
         type: string
         default: "https://sonarqube.us/api/v2"
       users_path:
-        description: "Users collection path under the base"
+        description: "v2 users collection path under the base"
         required: false
         type: string
         default: "/users-management/users"
       organization_id:
-        description: "Organization UUID (leave empty to auto-resolve from org_key)"
+        description: "Organization UUID (v2 only; leave empty to auto-resolve)"
         required: false
         type: string
         default: ""
-      org_key:
-        description: "Organization key"
-        required: false
-        type: string
-        default: "gourabd1ms"
 
 jobs:
   delete:
@@ -100,7 +106,7 @@ jobs:
           echo "::add-mask::$TOKEN"
           echo "TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
-      - name: Guard - refuse to delete the token's own account
+      - name: Guard - refuse to act on the token's own account
         run: |
           set +e
           set -uo pipefail
@@ -108,73 +114,94 @@ jobs:
           ME=$(jq -r '.login // empty' me.json)
           echo "Token belongs to: ${ME:-<unknown>}"
           if [ -n "$ME" ] && [ "$ME" = "$CONFIRM_LOGIN" ]; then
-            echo "::error::Refusing to delete the account that owns the API token ($ME)."
+            echo "::error::Refusing to remove the account that owns the API token ($ME)."
             exit 1
           fi
 
-      - name: Resolve organization UUID
+      - name: Resolve target user and pick a surface
         run: |
           set +e
           set -uo pipefail
-          if [ -n "$ORG_ID" ]; then
-            echo "ORG_ID=$ORG_ID" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          curl -sS -u "$TOKEN:" "$WEB_HOST/api/organizations/search?member=true" -o orgs.json \
-            -w 'organizations/search -> HTTP %{http_code}\n'
-          RESOLVED=$(jq -r --arg k "$ORG_KEY" '.organizations[]? | select(.key==$k) | .id // empty' orgs.json 2>/dev/null | head -1)
-          echo "Resolved UUID for org '$ORG_KEY': ${RESOLVED:-<none>}"
-          echo "ORG_ID=$RESOLVED" >> "$GITHUB_ENV"
 
-      - name: Resolve target user
-        run: |
-          set +e
-          set -uo pipefail
-          if [ -n "$USER_ID" ]; then
-            URL="${API_BASE}${USERS_PATH}/${USER_ID}"
-            echo "---- GET $URL ----"
-            CODE=$(curl -sS -o target.json -w '%{http_code}' --max-time 60 \
-                     -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$URL" || echo 000)
-          else
-            QS=$(python3 - <<'PY'
+          if [ -z "$ORG_ID" ]; then
+            curl -sS -u "$TOKEN:" "$WEB_HOST/api/organizations/search?member=true" -o orgs.json
+            ORG_ID=$(jq -r --arg k "$ORG_KEY" '.organizations[]? | select(.key==$k) | .id // empty' orgs.json 2>/dev/null | head -1)
+          fi
+
+          SURFACE=""
+          TARGET_ID="$USER_ID"
+
+          # --- try v2 unless the caller forced v1 --------------------------
+          if [ "$MODE" != "org-remove-member" ]; then
+            if [ -z "$TARGET_ID" ]; then
+              QS=$(ORG_ID="$ORG_ID" python3 - <<'PY'
           import os, urllib.parse
-          pairs = [("q", os.environ["CONFIRM_LOGIN"]),
+          pairs = [("q", os.environ.get("CONFIRM_LOGIN", "")),
                    ("organizationIds", os.environ.get("ORG_ID", "")),
                    ("pageSize", "100")]
           print(urllib.parse.urlencode([(k, v) for k, v in pairs if v != ""]))
           PY
           )
-            URL="${API_BASE}${USERS_PATH}?${QS}"
-            echo "---- GET $URL ----"
-            CODE=$(curl -sS -o search.json -w '%{http_code}' --max-time 60 \
-                     -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$URL" || echo 000)
-            if [ "$CODE" = "200" ]; then
-              jq -r --arg needle "$CONFIRM_LOGIN" \
-                '(.users // .items // []) [] | select((.login // "") == $needle)' search.json > target.json
+              URL="${API_BASE}${USERS_PATH}?${QS}"
+              echo "---- GET $URL ----"
+              CODE=$(curl -sS -o v2.json -w '%{http_code}' --max-time 60 \
+                       -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$URL")
+              echo "HTTP $CODE"
+              if [ "$CODE" = "200" ]; then
+                TARGET_ID=$(jq -r --arg n "$CONFIRM_LOGIN" \
+                  '(.users // .items // []) [] | select((.login // "")==$n) | .id // .uuid' v2.json | head -1)
+              fi
+            fi
+            if [ -n "$TARGET_ID" ]; then
+              URL="${API_BASE}${USERS_PATH}/${TARGET_ID}"
+              echo "---- GET $URL ----"
+              CODE=$(curl -sS -o target.json -w '%{http_code}' --max-time 60 \
+                       -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$URL")
+              echo "HTTP $CODE"
+              if [ "$CODE" = "200" ]; then SURFACE=v2; fi
             fi
           fi
-          echo "HTTP $CODE"
-          if [ "$CODE" != "200" ]; then
-            echo "::error::Could not read the users API (HTTP $CODE). Run sonar-v2-users-discover.yml to confirm api_base / users_path."
-            cat target.json search.json 2>/dev/null
-            exit 1
+
+          # --- v1 fallback -------------------------------------------------
+          if [ -z "$SURFACE" ]; then
+            if [ "$MODE" = "v2-delete" ]; then
+              echo "::error::mode=v2-delete but the v2 users API is not reachable at ${API_BASE}${USERS_PATH}. Run sonar-v2-users-discover.yml."
+              exit 1
+            fi
+            echo "Using the v1 organization-membership surface."
+            URL="$WEB_HOST/api/organizations/search_members?organization=${ORG_KEY}&q=${CONFIRM_LOGIN}&ps=100"
+            echo "---- GET $URL ----"
+            CODE=$(curl -sS -o members.json -w '%{http_code}' --max-time 60 -u "$TOKEN:" "$URL")
+            echo "HTTP $CODE"
+            if [ "$CODE" != "200" ]; then
+              echo "::error::v1 search_members failed with HTTP $CODE."
+              cat members.json
+              exit 1
+            fi
+            jq -r --arg n "$CONFIRM_LOGIN" '.users[] | select((.login // "")==$n)' members.json > target.json
+            SURFACE=v1
           fi
-          if [ ! -s target.json ] || [ "$(jq -r 'if type=="object" then (.id // .uuid // "") else "" end' target.json)" = "" ]; then
+
+          if [ ! -s target.json ]; then
             echo "::error::No user with login '$CONFIRM_LOGIN' was found."
-            cat search.json 2>/dev/null
+            cat members.json 2>/dev/null
             exit 1
           fi
 
-          TARGET_ID=$(jq -r '.id // .uuid' target.json)
-          TARGET_LOGIN=$(jq -r '.login // ""' target.json)
-          echo "=== Target user ==="
+          echo "=== Target user (surface: $SURFACE) ==="
           jq . target.json
 
+          TARGET_LOGIN=$(jq -r '.login // ""' target.json)
           if [ "$TARGET_LOGIN" != "$CONFIRM_LOGIN" ]; then
-            echo "::error::Safety check failed: resolved login '$TARGET_LOGIN' does not equal confirm_login '$CONFIRM_LOGIN'."
+            echo "::error::Safety check failed: resolved login '$TARGET_LOGIN' != confirm_login '$CONFIRM_LOGIN'."
             exit 1
           fi
-          echo "TARGET_ID=$TARGET_ID" >> "$GITHUB_ENV"
+          if [ "$(jq -r '.isOrgAdmin // false' target.json)" = "true" ]; then
+            echo "::warning::$TARGET_LOGIN is an organization admin/owner - removal may be rejected or may leave the org without an owner."
+          fi
+
+          echo "SURFACE=$SURFACE" >> "$GITHUB_ENV"
+          echo "TARGET_ID=${TARGET_ID:-}" >> "$GITHUB_ENV"
           echo "TARGET_LOGIN=$TARGET_LOGIN" >> "$GITHUB_ENV"
 
       - name: Dry run - stop before deleting
@@ -182,16 +209,20 @@ jobs:
         run: |
           set +e
           set -uo pipefail
-          if [ "$MODE" = "v2-delete" ]; then
+          if [ "$SURFACE" = "v2" ]; then
             SUFFIX=""
             if [ "$ANONYMIZE" = "true" ]; then SUFFIX="?anonymize=true"; fi
-            echo "DRY RUN - would issue: DELETE ${API_BASE}${USERS_PATH}/${TARGET_ID}${SUFFIX}"
+            ACTION="DELETE ${API_BASE}${USERS_PATH}/${TARGET_ID}${SUFFIX}"
           else
-            echo "DRY RUN - would issue: POST $WEB_HOST/api/organizations/remove_member (organization=$ORG_KEY, login=$TARGET_LOGIN)"
+            ACTION="POST $WEB_HOST/api/organizations/remove_member (organization=$ORG_KEY, login=$TARGET_LOGIN)"
           fi
+          echo "DRY RUN - would issue: $ACTION"
           {
             echo "### Dry run"
-            echo "Target: \`$TARGET_LOGIN\` (\`$TARGET_ID\`). Nothing was deleted."
+            echo "Target: \`$TARGET_LOGIN\` (surface \`$SURFACE\`). Nothing was changed."
+            echo
+            echo "Would issue: \`$ACTION\`"
+            echo
             echo "Re-run with \`dry_run = false\` to execute."
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -200,36 +231,36 @@ jobs:
         run: |
           set +e
           set -uo pipefail
-          if [ "$MODE" = "v2-delete" ]; then
+          if [ "$SURFACE" = "v2" ]; then
             SUFFIX=""
             if [ "$ANONYMIZE" = "true" ]; then SUFFIX="?anonymize=true"; fi
             URL="${API_BASE}${USERS_PATH}/${TARGET_ID}${SUFFIX}"
             echo "---- DELETE $URL ----"
             CODE=$(curl -sS -o resp.json -w '%{http_code}' --max-time 60 -X DELETE \
-                     -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$URL" || echo 000)
+                     -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$URL")
             if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
               echo "Bearer rejected; retrying with HTTP basic (token as username)."
               CODE=$(curl -sS -o resp.json -w '%{http_code}' --max-time 60 -X DELETE \
-                       -u "$TOKEN:" -H "Accept: application/json" "$URL" || echo 000)
+                       -u "$TOKEN:" -H "Accept: application/json" "$URL")
             fi
           else
             URL="$WEB_HOST/api/organizations/remove_member"
             echo "---- POST $URL ----"
             CODE=$(curl -sS -o resp.json -w '%{http_code}' --max-time 60 -X POST -u "$TOKEN:" \
                      --data-urlencode "organization=$ORG_KEY" \
-                     --data-urlencode "login=$TARGET_LOGIN" "$URL" || echo 000)
+                     --data-urlencode "login=$TARGET_LOGIN" "$URL")
           fi
           echo "HTTP $CODE"
           cat resp.json 2>/dev/null; echo
 
           {
             echo "### Delete result"
-            echo "Mode: \`$MODE\` - target \`$TARGET_LOGIN\` (\`$TARGET_ID\`) - HTTP \`$CODE\`"
+            echo "Surface \`$SURFACE\` - target \`$TARGET_LOGIN\` - HTTP \`$CODE\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
           case "$CODE" in
-            200|202|204) echo "::notice::Deleted $TARGET_LOGIN (HTTP $CODE)" ;;
-            *) echo "::error::Delete failed with HTTP $CODE"; exit 1 ;;
+            200|202|204) echo "::notice::Removed $TARGET_LOGIN (HTTP $CODE)" ;;
+            *) echo "::error::Removal failed with HTTP $CODE"; exit 1 ;;
           esac
 
       - name: Verify the user is gone
@@ -237,11 +268,18 @@ jobs:
         run: |
           set +e
           set -uo pipefail
-          URL="${API_BASE}${USERS_PATH}/${TARGET_ID}"
-          CODE=$(curl -sS -o after.json -w '%{http_code}' --max-time 60 \
-                   -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$URL" || echo 000)
+          if [ "$SURFACE" = "v2" ]; then
+            URL="${API_BASE}${USERS_PATH}/${TARGET_ID}"
+            CODE=$(curl -sS -o after.json -w '%{http_code}' --max-time 60 \
+                     -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$URL")
+          else
+            URL="$WEB_HOST/api/organizations/search_members?organization=${ORG_KEY}&q=${TARGET_LOGIN}&ps=100"
+            CODE=$(curl -sS -o after.json -w '%{http_code}' --max-time 60 -u "$TOKEN:" "$URL")
+          fi
           echo "GET $URL -> HTTP $CODE"
-          jq '{id: (.id // .uuid), login, active, managed}' after.json 2>/dev/null || head -c 500 after.json
+          cat after.json; echo
+          STILL=$(jq -r --arg n "$TARGET_LOGIN" '[(.users // [])[] | select(.login==$n)] | length' after.json 2>/dev/null)
+          echo "Still present in the member list: ${STILL:-?}"
 
       - name: Upload results
         if: always()
@@ -250,7 +288,8 @@ jobs:
           name: sonar-v2-users-delete
           path: |
             target.json
-            search.json
+            members.json
+            v2.json
             resp.json
             after.json
             orgs.json

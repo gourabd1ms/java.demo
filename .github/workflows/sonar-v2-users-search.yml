@@ -1,76 +1,79 @@
 name: Sonar v2 - Users API - Search
 
-# GET {api_base}/users-management/users  (searchUsers)
+# searchUsers.
 #
-# Lists / filters users in the SonarQube Cloud organization. Run
-# sonar-v2-users-discover.yml first to confirm `api_base` and `users_path`
-# for this tenant, then pass the winning values here.
+# Primary surface (v2):
+#   GET {api_base}/users-management/users
+#     ?q&email&organizationIds&active&managed&externalIdentity&groupId
+#     &pageIndex&pageSize
 #
-# Query parameters (per the Users Management v2 spec; not all are honoured on
-# every edition - unknown params are generally ignored rather than rejected):
-#   q                  free-text match on login / name / email
-#   organizationIds    organization UUID (not the org key)
-#   email              exact email filter
-#   active             true | false
-#   managed            true = provisioned by the IdP, false = local
-#   externalIdentity    external/IdP identity filter
-#   groupId            restrict to members of a group UUID
-#   pageIndex, pageSize
+# MEASURED on this tenant (run 34922690963, sonar-v2-users-discover.yml):
+# every https://sonarqube.us/api/v2/* path answers 404 - SonarQube Cloud US
+# exposes no v2 users surface, and https://api.sonarqube.us is an AWS API
+# Gateway that wants SigV4, not a Sonar token. So this workflow tries v2
+# first and, on 404, falls back to the v1 endpoint that does work here:
+#   GET /api/organizations/search_members?organization=<key>&q&p&ps
+# Set fallback_v1=false to assert v2 only and fail loudly instead.
 #
-# Read-only. Emits a table to the job summary and the raw JSON as an artifact.
+# Read-only.
 
 on:
   workflow_dispatch:
     inputs:
+      q:
+        description: "Free-text filter on login / name / email"
+        required: false
+        type: string
+        default: ""
+      org_key:
+        description: "Organization key"
+        required: false
+        type: string
+        default: "gourabd1ms"
+      fallback_v1:
+        description: "Fall back to the v1 endpoint when v2 returns 404"
+        required: false
+        type: boolean
+        default: true
       api_base:
         description: "v2 API base URL"
         required: false
         type: string
         default: "https://sonarqube.us/api/v2"
       users_path:
-        description: "Users collection path under the base"
+        description: "v2 users collection path under the base"
         required: false
         type: string
         default: "/users-management/users"
-      q:
-        description: "Free-text filter on login / name / email"
-        required: false
-        type: string
-        default: ""
       email:
-        description: "Exact email filter"
+        description: "Exact email filter (v2 only)"
         required: false
         type: string
         default: ""
       organization_id:
-        description: "Organization UUID (leave empty to auto-resolve from org_key)"
+        description: "Organization UUID (v2 only; leave empty to auto-resolve)"
         required: false
         type: string
         default: ""
-      org_key:
-        description: "Organization key, used to auto-resolve the UUID"
-        required: false
-        type: string
-        default: "gourabd1ms"
       active:
-        description: "Filter by active state"
+        description: "Filter by active state (v2 only)"
         required: false
         type: choice
         options: [ "", "true", "false" ]
         default: ""
       managed:
-        description: "Filter by IdP-managed state"
+        description: "Filter by IdP-managed state (v2 only)"
         required: false
         type: choice
         options: [ "", "true", "false" ]
         default: ""
       external_identity:
-        description: "External / IdP identity filter"
+        description: "External / IdP identity filter (v2 only)"
         required: false
         type: string
         default: ""
       group_id:
-        description: "Restrict to members of this group UUID"
+        description: "Restrict to members of this group UUID (v2 only)"
         required: false
         type: string
         default: ""
@@ -84,11 +87,6 @@ on:
         required: false
         type: string
         default: "50"
-      all_pages:
-        description: "Follow pagination and fetch every page"
-        required: false
-        type: boolean
-        default: false
 
 jobs:
   search:
@@ -99,6 +97,7 @@ jobs:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       API_BASE: ${{ inputs.api_base }}
       USERS_PATH: ${{ inputs.users_path }}
+      FALLBACK_V1: ${{ inputs.fallback_v1 }}
       Q: ${{ inputs.q }}
       EMAIL: ${{ inputs.email }}
       ORG_ID: ${{ inputs.organization_id }}
@@ -109,7 +108,6 @@ jobs:
       GROUP_ID: ${{ inputs.group_id }}
       PAGE_INDEX: ${{ inputs.page_index }}
       PAGE_SIZE: ${{ inputs.page_size }}
-      ALL_PAGES: ${{ inputs.all_pages }}
       WEB_HOST: https://sonarqube.us
     steps:
       - name: Resolve token
@@ -126,107 +124,93 @@ jobs:
           echo "::add-mask::$TOKEN"
           echo "TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
-      - name: Resolve organization UUID
-        run: |
-          set +e
-          set -uo pipefail
-          if [ -n "$ORG_ID" ]; then
-            echo "Using supplied organization UUID: $ORG_ID"
-            echo "ORG_ID=$ORG_ID" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          curl -sS -u "$TOKEN:" "$WEB_HOST/api/organizations/search?member=true" -o orgs.json \
-            -w 'organizations/search -> HTTP %{http_code}\n'
-          RESOLVED=$(jq -r --arg k "$ORG_KEY" '.organizations[]? | select(.key==$k) | .id // empty' orgs.json 2>/dev/null | head -1)
-          echo "Resolved UUID for org '$ORG_KEY': ${RESOLVED:-<none>}"
-          echo "ORG_ID=$RESOLVED" >> "$GITHUB_ENV"
-
       - name: Search users
         run: |
           set +e
           set -uo pipefail
 
-          # Build the query string, skipping empty filters so we never send
-          # `q=&email=` style noise that some backends reject.
-          build_query() {
-            page="$1"
-            python3 - "$page" <<'PY'
-          import os, sys, urllib.parse
-          page = sys.argv[1]
-          pairs = [
-              ("q", os.environ.get("Q", "")),
-              ("email", os.environ.get("EMAIL", "")),
-              ("organizationIds", os.environ.get("ORG_ID", "")),
-              ("active", os.environ.get("ACTIVE", "")),
-              ("managed", os.environ.get("MANAGED", "")),
-              ("externalIdentity", os.environ.get("EXTERNAL_IDENTITY", "")),
-              ("groupId", os.environ.get("GROUP_ID", "")),
-              ("pageIndex", page),
-              ("pageSize", os.environ.get("PAGE_SIZE", "50")),
-          ]
+          # --- v2 attempt -------------------------------------------------
+          if [ -z "$ORG_ID" ]; then
+            curl -sS -u "$TOKEN:" "$WEB_HOST/api/organizations/search?member=true" -o orgs.json
+            ORG_ID=$(jq -r --arg k "$ORG_KEY" '.organizations[]? | select(.key==$k) | .id // empty' orgs.json 2>/dev/null | head -1)
+            echo "Organization UUID for '$ORG_KEY': ${ORG_ID:-<none exposed by v1>}"
+          fi
+
+          QS=$(ORG_ID="$ORG_ID" python3 - <<'PY'
+          import os, urllib.parse
+          pairs = [("q", os.environ.get("Q", "")),
+                   ("email", os.environ.get("EMAIL", "")),
+                   ("organizationIds", os.environ.get("ORG_ID", "")),
+                   ("active", os.environ.get("ACTIVE", "")),
+                   ("managed", os.environ.get("MANAGED", "")),
+                   ("externalIdentity", os.environ.get("EXTERNAL_IDENTITY", "")),
+                   ("groupId", os.environ.get("GROUP_ID", "")),
+                   ("pageIndex", os.environ.get("PAGE_INDEX", "1")),
+                   ("pageSize", os.environ.get("PAGE_SIZE", "50"))]
           print(urllib.parse.urlencode([(k, v) for k, v in pairs if v != ""]))
           PY
-          }
+          )
+          V2_URL="${API_BASE}${USERS_PATH}?${QS}"
+          echo "---- GET $V2_URL ----"
+          CODE=$(curl -sS -o v2.json -w '%{http_code}' --max-time 60 \
+                   -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$V2_URL")
+          echo "HTTP $CODE"
+          if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
+            echo "Bearer rejected; retrying with HTTP basic (token as username)."
+            CODE=$(curl -sS -o v2.json -w '%{http_code}' --max-time 60 \
+                     -u "$TOKEN:" -H "Accept: application/json" "$V2_URL")
+            echo "HTTP $CODE"
+          fi
+          head -c 400 v2.json; echo
 
-          fetch() {
-            page="$1"; out="$2"
-            qs=$(build_query "$page")
-            url="${API_BASE}${USERS_PATH}?${qs}"
-            echo "---- GET $url ----"
-            code=$(curl -sS -o "$out" -w '%{http_code}' --max-time 60 \
-                     -H "Authorization: Bearer $TOKEN" \
-                     -H "Accept: application/json" "$url" || echo 000)
-            echo "HTTP $code"
-            if [ "$code" = "401" ] || [ "$code" = "403" ]; then
-              echo "Bearer rejected; retrying with HTTP basic (token as username)."
-              code=$(curl -sS -o "$out" -w '%{http_code}' --max-time 60 \
-                       -u "$TOKEN:" -H "Accept: application/json" "$url" || echo 000)
-              echo "HTTP $code"
-            fi
-            echo "$code"> .last_code
-            head -c 400 "$out"; echo
-          }
-
-          fetch "$PAGE_INDEX" page-1.json
-          CODE=$(cat .last_code)
+          SURFACE=v2
           if [ "$CODE" != "200" ]; then
-            echo "::error::searchUsers returned HTTP $CODE from ${API_BASE}${USERS_PATH}. Run sonar-v2-users-discover.yml to find the correct base URL / path for this tenant."
-            cat page-1.json
-            exit 1
+            if [ "$FALLBACK_V1" != "true" ]; then
+              echo "::error::v2 searchUsers returned HTTP $CODE and fallback_v1 is off."
+              exit 1
+            fi
+            # --- v1 fallback ----------------------------------------------
+            echo
+            echo "v2 returned HTTP $CODE - falling back to v1 organizations/search_members."
+            V1_URL="$WEB_HOST/api/organizations/search_members?organization=${ORG_KEY}&p=${PAGE_INDEX}&ps=${PAGE_SIZE}"
+            if [ -n "$Q" ]; then V1_URL="${V1_URL}&q=${Q}"; fi
+            echo "---- GET $V1_URL ----"
+            CODE=$(curl -sS -o v1.json -w '%{http_code}' --max-time 60 -u "$TOKEN:" "$V1_URL")
+            echo "HTTP $CODE"
+            if [ "$CODE" != "200" ]; then
+              echo "::error::v1 search_members also failed with HTTP $CODE."
+              cat v1.json
+              exit 1
+            fi
+            SURFACE=v1
+            cp v1.json users.json
+          else
+            cp v2.json users.json
           fi
 
-          jq -s '.[0]' page-1.json > users.json
-
-          if [ "$ALL_PAGES" = "true" ]; then
-            TOTAL=$(jq -r '.page.total // .paging.total // 0' page-1.json)
-            PSIZE=$(jq -r '.page.pageSize // .paging.pageSize // '"$PAGE_SIZE" page-1.json)
-            LAST=$(( (TOTAL + PSIZE - 1) / PSIZE ))
-            echo "total=$TOTAL pageSize=$PSIZE lastPage=$LAST"
-            p=2
-            while [ "$p" -le "$LAST" ]; do
-              fetch "$p" "page-$p.json"
-              [ "$(cat .last_code)" = "200" ] || break
-              p=$((p + 1))
-            done
-            jq -s '{users: (map(.users // .items // []) | add), pages: length}' page-*.json > users.json
-          fi
-
+          echo "SURFACE=$SURFACE" >> "$GITHUB_ENV"
           echo
-          echo "=== Users ==="
+          echo "=== Users (surface: $SURFACE) ==="
           jq -r '(.users // .items // []) [] |
-                 "\(.id // .uuid // "-")\t\(.login // "-")\t\(.name // "-")\t\(.email // "-")\tactive=\(.active // "-")\tmanaged=\(.managed // "-")"' \
+                 "\(.id // .uuid // "-")\t\(.login // "-")\t\(.name // "-")\t\(.email // "-")\tactive=\(.active // "-")\tmanaged=\(.managed // "-")\torgAdmin=\(.isOrgAdmin // "-")"' \
             users.json || cat users.json
+          echo
+          echo "total: $(jq -r '.page.total // .paging.total // .total // "?"' users.json)"
 
           {
-            echo "### searchUsers"
+            echo "### searchUsers (surface: \`$SURFACE\`)"
             echo
-            echo "\`GET ${API_BASE}${USERS_PATH}\`"
+            if [ "$SURFACE" = "v2" ]; then
+              echo "\`GET ${API_BASE}${USERS_PATH}\`"
+            else
+              echo "v2 unavailable on this tenant - used \`GET /api/organizations/search_members?organization=$ORG_KEY\`"
+            fi
             echo
-            echo "| id | login | name | email | active | managed |"
-            echo "|---|---|---|---|---|---|"
+            echo "| id | login | name | email | active | managed | orgAdmin |"
+            echo "|---|---|---|---|---|---|---|"
             jq -r '(.users // .items // []) [] |
-                   "| \(.id // .uuid // "-") | \(.login // "-") | \(.name // "-") | \(.email // "-") | \(.active // "-") | \(.managed // "-") |"' \
-              users.json 2>/dev/null || echo "| (could not parse response) | | | | | |"
+                   "| \(.id // .uuid // "-") | \(.login // "-") | \(.name // "-") | \(.email // "-") | \(.active // "-") | \(.managed // "-") | \(.isOrgAdmin // "-") |"' \
+              users.json 2>/dev/null || echo "| (could not parse response) | | | | | | |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload results
@@ -236,6 +220,7 @@ jobs:
           name: sonar-v2-users-search
           path: |
             users.json
-            page-*.json
+            v1.json
+            v2.json
             orgs.json
           if-no-files-found: ignore

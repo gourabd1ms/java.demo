@@ -1,46 +1,61 @@
 name: Sonar v2 - Users API - Get
 
-# GET {api_base}/users-management/users/{id}   (getUser)
+# getUser.
 #
-# Fetches a single user. v2 addresses users by UUID, not by login, so if you
-# only know the login/email this workflow first calls searchUsers to resolve
-# the UUID and then does the GET.
+# Primary surface (v2):
+#   GET {api_base}/users-management/users/{id}
+# v2 addresses users by UUID, so a login/email is resolved via searchUsers
+# first.
 #
-# Read-only. Run sonar-v2-users-discover.yml first if `api_base` is unproven.
+# MEASURED on this tenant (run 34922690963, sonar-v2-users-discover.yml):
+# https://sonarqube.us/api/v2/* answers 404 throughout. The v1 fallback used
+# here, which does work:
+#   GET /api/organizations/search_members?organization=<key>&q=<login>
+#   GET /api/users/groups?login=<login>&organization=<key>
+# Note v1 Cloud has no /api/users/search (404), so search_members is the only
+# way to look a user up, and it keys on login, not UUID.
+# Set fallback_v1=false to assert v2 only and fail loudly instead.
+#
+# Read-only.
 
 on:
   workflow_dispatch:
     inputs:
+      login_or_email:
+        description: "Login or email of the user (required for the v1 fallback)"
+        required: false
+        type: string
+        default: ""
+      user_id:
+        description: "User UUID (v2 only). Leave empty to resolve from login_or_email."
+        required: false
+        type: string
+        default: ""
+      org_key:
+        description: "Organization key"
+        required: false
+        type: string
+        default: "gourabd1ms"
+      fallback_v1:
+        description: "Fall back to the v1 endpoints when v2 returns 404"
+        required: false
+        type: boolean
+        default: true
       api_base:
         description: "v2 API base URL"
         required: false
         type: string
         default: "https://sonarqube.us/api/v2"
       users_path:
-        description: "Users collection path under the base"
+        description: "v2 users collection path under the base"
         required: false
         type: string
         default: "/users-management/users"
-      user_id:
-        description: "User UUID. Leave empty to resolve from login_or_email."
-        required: false
-        type: string
-        default: ""
-      login_or_email:
-        description: "Login or email to resolve into a UUID (used when user_id is empty)"
-        required: false
-        type: string
-        default: ""
       organization_id:
-        description: "Organization UUID (leave empty to auto-resolve from org_key)"
+        description: "Organization UUID (v2 only; leave empty to auto-resolve)"
         required: false
         type: string
         default: ""
-      org_key:
-        description: "Organization key, used to auto-resolve the UUID"
-        required: false
-        type: string
-        default: "gourabd1ms"
 
 jobs:
   get:
@@ -51,6 +66,7 @@ jobs:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       API_BASE: ${{ inputs.api_base }}
       USERS_PATH: ${{ inputs.users_path }}
+      FALLBACK_V1: ${{ inputs.fallback_v1 }}
       USER_ID: ${{ inputs.user_id }}
       LOGIN_OR_EMAIL: ${{ inputs.login_or_email }}
       ORG_ID: ${{ inputs.organization_id }}
@@ -80,81 +96,107 @@ jobs:
             exit 1
           fi
 
-      - name: Resolve organization UUID
+      - name: Get user
         run: |
           set +e
           set -uo pipefail
-          if [ -n "$ORG_ID" ]; then
-            echo "ORG_ID=$ORG_ID" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          curl -sS -u "$TOKEN:" "$WEB_HOST/api/organizations/search?member=true" -o orgs.json \
-            -w 'organizations/search -> HTTP %{http_code}\n'
-          RESOLVED=$(jq -r --arg k "$ORG_KEY" '.organizations[]? | select(.key==$k) | .id // empty' orgs.json 2>/dev/null | head -1)
-          echo "Resolved UUID for org '$ORG_KEY': ${RESOLVED:-<none>}"
-          echo "ORG_ID=$RESOLVED" >> "$GITHUB_ENV"
 
-      - name: Resolve UUID from login/email
-        if: ${{ inputs.user_id == '' }}
-        run: |
-          set +e
-          set -uo pipefail
-          QS=$(python3 - <<'PY'
+          if [ -z "$ORG_ID" ]; then
+            curl -sS -u "$TOKEN:" "$WEB_HOST/api/organizations/search?member=true" -o orgs.json
+            ORG_ID=$(jq -r --arg k "$ORG_KEY" '.organizations[]? | select(.key==$k) | .id // empty' orgs.json 2>/dev/null | head -1)
+          fi
+
+          v2get() {
+            url="$1"
+            curl -sS -o v2.json -w '%{http_code}' --max-time 60 \
+              -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$url"
+          }
+
+          # --- v2 attempt -------------------------------------------------
+          TARGET_ID="$USER_ID"
+          if [ -z "$TARGET_ID" ]; then
+            QS=$(ORG_ID="$ORG_ID" python3 - <<'PY'
           import os, urllib.parse
-          pairs = [("q", os.environ["LOGIN_OR_EMAIL"]),
+          pairs = [("q", os.environ.get("LOGIN_OR_EMAIL", "")),
                    ("organizationIds", os.environ.get("ORG_ID", "")),
                    ("pageSize", "100")]
           print(urllib.parse.urlencode([(k, v) for k, v in pairs if v != ""]))
           PY
           )
-          URL="${API_BASE}${USERS_PATH}?${QS}"
-          echo "---- GET $URL ----"
-          CODE=$(curl -sS -o search.json -w '%{http_code}' --max-time 60 \
-                   -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$URL" || echo 000)
-          echo "HTTP $CODE"
-          if [ "$CODE" != "200" ]; then
-            echo "::error::searchUsers returned HTTP $CODE. Run sonar-v2-users-discover.yml to confirm api_base / users_path."
-            cat search.json
-            exit 1
-          fi
-          RESOLVED=$(jq -r --arg needle "$LOGIN_OR_EMAIL" \
-            '(.users // .items // []) [] | select((.login // "") == $needle or (.email // "") == $needle) | .id // .uuid' \
-            search.json | head -1)
-          if [ -z "$RESOLVED" ]; then
-            echo "No exact login/email match. Candidates returned by the search:"
-            jq -r '(.users // .items // []) [] | "\(.id // .uuid)  \(.login // "-")  \(.email // "-")"' search.json
-            echo "::error::Could not resolve '$LOGIN_OR_EMAIL' to a user UUID."
-            exit 1
-          fi
-          echo "Resolved '$LOGIN_OR_EMAIL' -> $RESOLVED"
-          echo "USER_ID=$RESOLVED" >> "$GITHUB_ENV"
-
-      - name: Get user
-        run: |
-          set +e
-          set -uo pipefail
-          URL="${API_BASE}${USERS_PATH}/${USER_ID}"
-          echo "---- GET $URL ----"
-          CODE=$(curl -sS -o user.json -w '%{http_code}' --max-time 60 \
-                   -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$URL" || echo 000)
-          echo "HTTP $CODE"
-          if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
-            echo "Bearer rejected; retrying with HTTP basic (token as username)."
-            CODE=$(curl -sS -o user.json -w '%{http_code}' --max-time 60 \
-                     -u "$TOKEN:" -H "Accept: application/json" "$URL" || echo 000)
+            SEARCH_URL="${API_BASE}${USERS_PATH}?${QS}"
+            echo "---- GET $SEARCH_URL ----"
+            CODE=$(v2get "$SEARCH_URL")
             echo "HTTP $CODE"
+            if [ "$CODE" = "200" ]; then
+              TARGET_ID=$(jq -r --arg n "$LOGIN_OR_EMAIL" \
+                '(.users // .items // []) [] | select((.login // "")==$n or (.email // "")==$n) | .id // .uuid' v2.json | head -1)
+              echo "Resolved '$LOGIN_OR_EMAIL' -> ${TARGET_ID:-<no match>}"
+            fi
           fi
-          jq . user.json 2>/dev/null || cat user.json
+
+          CODE=404
+          if [ -n "$TARGET_ID" ]; then
+            V2_URL="${API_BASE}${USERS_PATH}/${TARGET_ID}"
+            echo "---- GET $V2_URL ----"
+            CODE=$(v2get "$V2_URL")
+            echo "HTTP $CODE"
+            head -c 400 v2.json; echo
+          fi
+
+          if [ "$CODE" = "200" ]; then
+            cp v2.json user.json
+            echo "SURFACE=v2" >> "$GITHUB_ENV"
+            jq . user.json
+          else
+            if [ "$FALLBACK_V1" != "true" ]; then
+              echo "::error::v2 getUser returned HTTP $CODE and fallback_v1 is off."
+              exit 1
+            fi
+            if [ -z "$LOGIN_OR_EMAIL" ]; then
+              echo "::error::v2 is unavailable and the v1 fallback needs login_or_email (v1 has no UUID lookup)."
+              exit 1
+            fi
+            # --- v1 fallback ----------------------------------------------
+            echo
+            echo "v2 returned HTTP $CODE - falling back to v1."
+            V1_URL="$WEB_HOST/api/organizations/search_members?organization=${ORG_KEY}&q=${LOGIN_OR_EMAIL}&ps=100"
+            echo "---- GET $V1_URL ----"
+            CODE=$(curl -sS -o members.json -w '%{http_code}' --max-time 60 -u "$TOKEN:" "$V1_URL")
+            echo "HTTP $CODE"
+            if [ "$CODE" != "200" ]; then
+              echo "::error::v1 search_members failed with HTTP $CODE."
+              cat members.json
+              exit 1
+            fi
+            jq -r --arg n "$LOGIN_OR_EMAIL" \
+              '.users[] | select((.login // "")==$n or (.name // "")==$n)' members.json > user.json
+            if [ ! -s user.json ]; then
+              echo "No exact match for '$LOGIN_OR_EMAIL'. Members returned:"
+              jq -r '.users[] | "\(.login)  \(.name)"' members.json
+              echo "::error::User '$LOGIN_OR_EMAIL' not found in organization '$ORG_KEY'."
+              exit 1
+            fi
+            LOGIN=$(jq -r '.login' user.json)
+            echo "=== Member record ==="
+            jq . user.json
+            echo "=== Group memberships ==="
+            curl -sS -u "$TOKEN:" -o groups.json -w 'HTTP %{http_code}\n' \
+              "$WEB_HOST/api/users/groups?login=${LOGIN}&organization=${ORG_KEY}&ps=100"
+            jq -r '.groups[]? | "\(.id)\t\(.name)\t\(.description)"' groups.json || cat groups.json
+            echo "SURFACE=v1" >> "$GITHUB_ENV"
+          fi
+
           {
             echo "### getUser"
             echo
-            echo "\`GET $URL\` -> HTTP $CODE"
-            echo
             echo '```json'
-            jq . user.json 2>/dev/null | head -100 || head -c 2000 user.json
+            jq . user.json 2>/dev/null | head -60
             echo '```'
+            if [ -s groups.json ]; then
+              echo
+              echo "Groups: $(jq -r '[.groups[]?.name] | join(", ")' groups.json)"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
-          [ "$CODE" = "200" ] || exit 1
 
       - name: Upload results
         if: always()
@@ -163,6 +205,8 @@ jobs:
           name: sonar-v2-users-get
           path: |
             user.json
-            search.json
+            groups.json
+            members.json
+            v2.json
             orgs.json
           if-no-files-found: ignore
