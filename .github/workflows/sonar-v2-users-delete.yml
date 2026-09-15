@@ -1,0 +1,250 @@
+name: Sonar v2 - Users API - Delete
+
+# DELETE {api_base}/users-management/users/{id}[?anonymize=true]  (deleteUser)
+#
+# DESTRUCTIVE. In SonarQube's v2 users API a DELETE deactivates the account
+# and, with anonymize=true, also scrubs its personal data - neither is
+# reversible. Guard rails in this workflow:
+#   * dry_run defaults to true - it resolves and shows the target, then stops.
+#   * confirm_login must exactly equal the login of the resolved user before
+#     any DELETE is issued.
+#   * the target is always fetched and printed before it is deleted.
+#
+# On SonarQube Cloud an "account" is global and org membership is separate, so
+# the v2 delete may be refused for the tenant. Set mode=org-remove-member to
+# use the classic POST /api/organizations/remove_member instead, which drops
+# the user from the organization without touching their global account.
+#
+# Run sonar-v2-users-discover.yml first if `api_base` is unproven.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "v2-delete = DELETE the account; org-remove-member = only remove from the organization"
+        required: true
+        type: choice
+        options:
+          - v2-delete
+          - org-remove-member
+        default: v2-delete
+      dry_run:
+        description: "Resolve and display the target without deleting"
+        required: true
+        type: boolean
+        default: true
+      confirm_login:
+        description: "Type the exact login of the user to delete (safety check)"
+        required: true
+        type: string
+      user_id:
+        description: "User UUID. Leave empty to resolve from confirm_login."
+        required: false
+        type: string
+        default: ""
+      anonymize:
+        description: "Also anonymize personal data (v2-delete only)"
+        required: false
+        type: boolean
+        default: false
+      api_base:
+        description: "v2 API base URL"
+        required: false
+        type: string
+        default: "https://sonarqube.us/api/v2"
+      users_path:
+        description: "Users collection path under the base"
+        required: false
+        type: string
+        default: "/users-management/users"
+      organization_id:
+        description: "Organization UUID (leave empty to auto-resolve from org_key)"
+        required: false
+        type: string
+        default: ""
+      org_key:
+        description: "Organization key"
+        required: false
+        type: string
+        default: "gourabd1ms"
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    env:
+      SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
+      SONARQUBE_API_TOKEN: ${{ secrets.SONARQUBE_API_TOKEN }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      MODE: ${{ inputs.mode }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      CONFIRM_LOGIN: ${{ inputs.confirm_login }}
+      USER_ID: ${{ inputs.user_id }}
+      ANONYMIZE: ${{ inputs.anonymize }}
+      API_BASE: ${{ inputs.api_base }}
+      USERS_PATH: ${{ inputs.users_path }}
+      ORG_ID: ${{ inputs.organization_id }}
+      ORG_KEY: ${{ inputs.org_key }}
+      WEB_HOST: https://sonarqube.us
+    steps:
+      - name: Resolve token
+        run: |
+          set -uo pipefail
+          TOKEN="${SONAR_ENT_TOKEN:-}"
+          [ -z "$TOKEN" ] && TOKEN="${SONARQUBE_API_TOKEN:-}"
+          [ -z "$TOKEN" ] && TOKEN="${SONAR_TOKEN:-}"
+          if [ -z "$TOKEN" ]; then
+            echo "::error::No Sonar token found. Set repo secret SONAR_ENT_TOKEN (or SONARQUBE_API_TOKEN / SONAR_TOKEN)."
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Guard - refuse to delete the token's own account
+        run: |
+          set -uo pipefail
+          curl -sS -u "$TOKEN:" "$WEB_HOST/api/users/current" -o me.json -w 'users/current -> HTTP %{http_code}\n'
+          ME=$(jq -r '.login // empty' me.json)
+          echo "Token belongs to: ${ME:-<unknown>}"
+          if [ -n "$ME" ] && [ "$ME" = "$CONFIRM_LOGIN" ]; then
+            echo "::error::Refusing to delete the account that owns the API token ($ME)."
+            exit 1
+          fi
+
+      - name: Resolve organization UUID
+        run: |
+          set -uo pipefail
+          if [ -n "$ORG_ID" ]; then
+            echo "ORG_ID=$ORG_ID" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          curl -sS -u "$TOKEN:" "$WEB_HOST/api/organizations/search?member=true" -o orgs.json \
+            -w 'organizations/search -> HTTP %{http_code}\n'
+          RESOLVED=$(jq -r --arg k "$ORG_KEY" '.organizations[]? | select(.key==$k) | .id // empty' orgs.json 2>/dev/null | head -1)
+          echo "Resolved UUID for org '$ORG_KEY': ${RESOLVED:-<none>}"
+          echo "ORG_ID=$RESOLVED" >> "$GITHUB_ENV"
+
+      - name: Resolve target user
+        run: |
+          set -uo pipefail
+          if [ -n "$USER_ID" ]; then
+            URL="${API_BASE}${USERS_PATH}/${USER_ID}"
+            echo "---- GET $URL ----"
+            CODE=$(curl -sS -o target.json -w '%{http_code}' --max-time 60 \
+                     -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$URL" || echo 000)
+          else
+            QS=$(python3 - <<'PY'
+          import os, urllib.parse
+          pairs = [("q", os.environ["CONFIRM_LOGIN"]),
+                   ("organizationIds", os.environ.get("ORG_ID", "")),
+                   ("pageSize", "100")]
+          print(urllib.parse.urlencode([(k, v) for k, v in pairs if v != ""]))
+          PY
+          )
+            URL="${API_BASE}${USERS_PATH}?${QS}"
+            echo "---- GET $URL ----"
+            CODE=$(curl -sS -o search.json -w '%{http_code}' --max-time 60 \
+                     -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$URL" || echo 000)
+            if [ "$CODE" = "200" ]; then
+              jq -r --arg needle "$CONFIRM_LOGIN" \
+                '(.users // .items // []) [] | select((.login // "") == $needle)' search.json > target.json
+            fi
+          fi
+          echo "HTTP $CODE"
+          if [ "$CODE" != "200" ]; then
+            echo "::error::Could not read the users API (HTTP $CODE). Run sonar-v2-users-discover.yml to confirm api_base / users_path."
+            cat target.json search.json 2>/dev/null
+            exit 1
+          fi
+          if [ ! -s target.json ] || [ "$(jq -r 'if type=="object" then (.id // .uuid // "") else "" end' target.json)" = "" ]; then
+            echo "::error::No user with login '$CONFIRM_LOGIN' was found."
+            cat search.json 2>/dev/null
+            exit 1
+          fi
+
+          TARGET_ID=$(jq -r '.id // .uuid' target.json)
+          TARGET_LOGIN=$(jq -r '.login // ""' target.json)
+          echo "=== Target user ==="
+          jq . target.json
+
+          if [ "$TARGET_LOGIN" != "$CONFIRM_LOGIN" ]; then
+            echo "::error::Safety check failed: resolved login '$TARGET_LOGIN' does not equal confirm_login '$CONFIRM_LOGIN'."
+            exit 1
+          fi
+          echo "TARGET_ID=$TARGET_ID" >> "$GITHUB_ENV"
+          echo "TARGET_LOGIN=$TARGET_LOGIN" >> "$GITHUB_ENV"
+
+      - name: Dry run - stop before deleting
+        if: ${{ inputs.dry_run }}
+        run: |
+          set -uo pipefail
+          if [ "$MODE" = "v2-delete" ]; then
+            SUFFIX=""
+            [ "$ANONYMIZE" = "true" ] && SUFFIX="?anonymize=true"
+            echo "DRY RUN - would issue: DELETE ${API_BASE}${USERS_PATH}/${TARGET_ID}${SUFFIX}"
+          else
+            echo "DRY RUN - would issue: POST $WEB_HOST/api/organizations/remove_member (organization=$ORG_KEY, login=$TARGET_LOGIN)"
+          fi
+          {
+            echo "### Dry run"
+            echo "Target: \`$TARGET_LOGIN\` (\`$TARGET_ID\`). Nothing was deleted."
+            echo "Re-run with \`dry_run = false\` to execute."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete user
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -uo pipefail
+          if [ "$MODE" = "v2-delete" ]; then
+            SUFFIX=""
+            [ "$ANONYMIZE" = "true" ] && SUFFIX="?anonymize=true"
+            URL="${API_BASE}${USERS_PATH}/${TARGET_ID}${SUFFIX}"
+            echo "---- DELETE $URL ----"
+            CODE=$(curl -sS -o resp.json -w '%{http_code}' --max-time 60 -X DELETE \
+                     -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$URL" || echo 000)
+            if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
+              echo "Bearer rejected; retrying with HTTP basic (token as username)."
+              CODE=$(curl -sS -o resp.json -w '%{http_code}' --max-time 60 -X DELETE \
+                       -u "$TOKEN:" -H "Accept: application/json" "$URL" || echo 000)
+            fi
+          else
+            URL="$WEB_HOST/api/organizations/remove_member"
+            echo "---- POST $URL ----"
+            CODE=$(curl -sS -o resp.json -w '%{http_code}' --max-time 60 -X POST -u "$TOKEN:" \
+                     --data-urlencode "organization=$ORG_KEY" \
+                     --data-urlencode "login=$TARGET_LOGIN" "$URL" || echo 000)
+          fi
+          echo "HTTP $CODE"
+          cat resp.json 2>/dev/null; echo
+
+          {
+            echo "### Delete result"
+            echo "Mode: \`$MODE\` - target \`$TARGET_LOGIN\` (\`$TARGET_ID\`) - HTTP \`$CODE\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          case "$CODE" in
+            200|202|204) echo "::notice::Deleted $TARGET_LOGIN (HTTP $CODE)" ;;
+            *) echo "::error::Delete failed with HTTP $CODE"; exit 1 ;;
+          esac
+
+      - name: Verify the user is gone
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -uo pipefail
+          URL="${API_BASE}${USERS_PATH}/${TARGET_ID}"
+          CODE=$(curl -sS -o after.json -w '%{http_code}' --max-time 60 \
+                   -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$URL" || echo 000)
+          echo "GET $URL -> HTTP $CODE"
+          jq '{id: (.id // .uuid), login, active, managed}' after.json 2>/dev/null || head -c 500 after.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonar-v2-users-delete
+          path: |
+            target.json
+            search.json
+            resp.json
+            after.json
+            orgs.json
+          if-no-files-found: ignore

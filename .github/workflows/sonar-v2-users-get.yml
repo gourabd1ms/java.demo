@@ -1,0 +1,163 @@
+name: Sonar v2 - Users API - Get
+
+# GET {api_base}/users-management/users/{id}   (getUser)
+#
+# Fetches a single user. v2 addresses users by UUID, not by login, so if you
+# only know the login/email this workflow first calls searchUsers to resolve
+# the UUID and then does the GET.
+#
+# Read-only. Run sonar-v2-users-discover.yml first if `api_base` is unproven.
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_base:
+        description: "v2 API base URL"
+        required: false
+        type: string
+        default: "https://sonarqube.us/api/v2"
+      users_path:
+        description: "Users collection path under the base"
+        required: false
+        type: string
+        default: "/users-management/users"
+      user_id:
+        description: "User UUID. Leave empty to resolve from login_or_email."
+        required: false
+        type: string
+        default: ""
+      login_or_email:
+        description: "Login or email to resolve into a UUID (used when user_id is empty)"
+        required: false
+        type: string
+        default: ""
+      organization_id:
+        description: "Organization UUID (leave empty to auto-resolve from org_key)"
+        required: false
+        type: string
+        default: ""
+      org_key:
+        description: "Organization key, used to auto-resolve the UUID"
+        required: false
+        type: string
+        default: "gourabd1ms"
+
+jobs:
+  get:
+    runs-on: ubuntu-latest
+    env:
+      SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
+      SONARQUBE_API_TOKEN: ${{ secrets.SONARQUBE_API_TOKEN }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      API_BASE: ${{ inputs.api_base }}
+      USERS_PATH: ${{ inputs.users_path }}
+      USER_ID: ${{ inputs.user_id }}
+      LOGIN_OR_EMAIL: ${{ inputs.login_or_email }}
+      ORG_ID: ${{ inputs.organization_id }}
+      ORG_KEY: ${{ inputs.org_key }}
+      WEB_HOST: https://sonarqube.us
+    steps:
+      - name: Resolve token
+        run: |
+          set -uo pipefail
+          TOKEN="${SONAR_ENT_TOKEN:-}"
+          [ -z "$TOKEN" ] && TOKEN="${SONARQUBE_API_TOKEN:-}"
+          [ -z "$TOKEN" ] && TOKEN="${SONAR_TOKEN:-}"
+          if [ -z "$TOKEN" ]; then
+            echo "::error::No Sonar token found. Set repo secret SONAR_ENT_TOKEN (or SONARQUBE_API_TOKEN / SONAR_TOKEN)."
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Validate inputs
+        run: |
+          set -uo pipefail
+          if [ -z "$USER_ID" ] && [ -z "$LOGIN_OR_EMAIL" ]; then
+            echo "::error::Provide either user_id or login_or_email."
+            exit 1
+          fi
+
+      - name: Resolve organization UUID
+        run: |
+          set -uo pipefail
+          if [ -n "$ORG_ID" ]; then
+            echo "ORG_ID=$ORG_ID" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          curl -sS -u "$TOKEN:" "$WEB_HOST/api/organizations/search?member=true" -o orgs.json \
+            -w 'organizations/search -> HTTP %{http_code}\n'
+          RESOLVED=$(jq -r --arg k "$ORG_KEY" '.organizations[]? | select(.key==$k) | .id // empty' orgs.json 2>/dev/null | head -1)
+          echo "Resolved UUID for org '$ORG_KEY': ${RESOLVED:-<none>}"
+          echo "ORG_ID=$RESOLVED" >> "$GITHUB_ENV"
+
+      - name: Resolve UUID from login/email
+        if: ${{ inputs.user_id == '' }}
+        run: |
+          set -uo pipefail
+          QS=$(python3 - <<'PY'
+          import os, urllib.parse
+          pairs = [("q", os.environ["LOGIN_OR_EMAIL"]),
+                   ("organizationIds", os.environ.get("ORG_ID", "")),
+                   ("pageSize", "100")]
+          print(urllib.parse.urlencode([(k, v) for k, v in pairs if v != ""]))
+          PY
+          )
+          URL="${API_BASE}${USERS_PATH}?${QS}"
+          echo "---- GET $URL ----"
+          CODE=$(curl -sS -o search.json -w '%{http_code}' --max-time 60 \
+                   -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$URL" || echo 000)
+          echo "HTTP $CODE"
+          if [ "$CODE" != "200" ]; then
+            echo "::error::searchUsers returned HTTP $CODE. Run sonar-v2-users-discover.yml to confirm api_base / users_path."
+            cat search.json
+            exit 1
+          fi
+          RESOLVED=$(jq -r --arg needle "$LOGIN_OR_EMAIL" \
+            '(.users // .items // []) [] | select((.login // "") == $needle or (.email // "") == $needle) | .id // .uuid' \
+            search.json | head -1)
+          if [ -z "$RESOLVED" ]; then
+            echo "No exact login/email match. Candidates returned by the search:"
+            jq -r '(.users // .items // []) [] | "\(.id // .uuid)  \(.login // "-")  \(.email // "-")"' search.json
+            echo "::error::Could not resolve '$LOGIN_OR_EMAIL' to a user UUID."
+            exit 1
+          fi
+          echo "Resolved '$LOGIN_OR_EMAIL' -> $RESOLVED"
+          echo "USER_ID=$RESOLVED" >> "$GITHUB_ENV"
+
+      - name: Get user
+        run: |
+          set -uo pipefail
+          URL="${API_BASE}${USERS_PATH}/${USER_ID}"
+          echo "---- GET $URL ----"
+          CODE=$(curl -sS -o user.json -w '%{http_code}' --max-time 60 \
+                   -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$URL" || echo 000)
+          echo "HTTP $CODE"
+          if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
+            echo "Bearer rejected; retrying with HTTP basic (token as username)."
+            CODE=$(curl -sS -o user.json -w '%{http_code}' --max-time 60 \
+                     -u "$TOKEN:" -H "Accept: application/json" "$URL" || echo 000)
+            echo "HTTP $CODE"
+          fi
+          jq . user.json 2>/dev/null || cat user.json
+          {
+            echo "### getUser"
+            echo
+            echo "\`GET $URL\` -> HTTP $CODE"
+            echo
+            echo '```json'
+            jq . user.json 2>/dev/null | head -100 || head -c 2000 user.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$CODE" = "200" ] || exit 1
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonar-v2-users-get
+          path: |
+            user.json
+            search.json
+            orgs.json
+          if-no-files-found: ignore

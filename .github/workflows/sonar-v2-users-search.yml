@@ -1,0 +1,238 @@
+name: Sonar v2 - Users API - Search
+
+# GET {api_base}/users-management/users  (searchUsers)
+#
+# Lists / filters users in the SonarQube Cloud organization. Run
+# sonar-v2-users-discover.yml first to confirm `api_base` and `users_path`
+# for this tenant, then pass the winning values here.
+#
+# Query parameters (per the Users Management v2 spec; not all are honoured on
+# every edition - unknown params are generally ignored rather than rejected):
+#   q                  free-text match on login / name / email
+#   organizationIds    organization UUID (not the org key)
+#   email              exact email filter
+#   active             true | false
+#   managed            true = provisioned by the IdP, false = local
+#   externalIdentity    external/IdP identity filter
+#   groupId            restrict to members of a group UUID
+#   pageIndex, pageSize
+#
+# Read-only. Emits a table to the job summary and the raw JSON as an artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_base:
+        description: "v2 API base URL"
+        required: false
+        type: string
+        default: "https://sonarqube.us/api/v2"
+      users_path:
+        description: "Users collection path under the base"
+        required: false
+        type: string
+        default: "/users-management/users"
+      q:
+        description: "Free-text filter on login / name / email"
+        required: false
+        type: string
+        default: ""
+      email:
+        description: "Exact email filter"
+        required: false
+        type: string
+        default: ""
+      organization_id:
+        description: "Organization UUID (leave empty to auto-resolve from org_key)"
+        required: false
+        type: string
+        default: ""
+      org_key:
+        description: "Organization key, used to auto-resolve the UUID"
+        required: false
+        type: string
+        default: "gourabd1ms"
+      active:
+        description: "Filter by active state"
+        required: false
+        type: choice
+        options: [ "", "true", "false" ]
+        default: ""
+      managed:
+        description: "Filter by IdP-managed state"
+        required: false
+        type: choice
+        options: [ "", "true", "false" ]
+        default: ""
+      external_identity:
+        description: "External / IdP identity filter"
+        required: false
+        type: string
+        default: ""
+      group_id:
+        description: "Restrict to members of this group UUID"
+        required: false
+        type: string
+        default: ""
+      page_index:
+        description: "Page index (1-based)"
+        required: false
+        type: string
+        default: "1"
+      page_size:
+        description: "Page size"
+        required: false
+        type: string
+        default: "50"
+      all_pages:
+        description: "Follow pagination and fetch every page"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    env:
+      SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
+      SONARQUBE_API_TOKEN: ${{ secrets.SONARQUBE_API_TOKEN }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      API_BASE: ${{ inputs.api_base }}
+      USERS_PATH: ${{ inputs.users_path }}
+      Q: ${{ inputs.q }}
+      EMAIL: ${{ inputs.email }}
+      ORG_ID: ${{ inputs.organization_id }}
+      ORG_KEY: ${{ inputs.org_key }}
+      ACTIVE: ${{ inputs.active }}
+      MANAGED: ${{ inputs.managed }}
+      EXTERNAL_IDENTITY: ${{ inputs.external_identity }}
+      GROUP_ID: ${{ inputs.group_id }}
+      PAGE_INDEX: ${{ inputs.page_index }}
+      PAGE_SIZE: ${{ inputs.page_size }}
+      ALL_PAGES: ${{ inputs.all_pages }}
+      WEB_HOST: https://sonarqube.us
+    steps:
+      - name: Resolve token
+        run: |
+          set -uo pipefail
+          TOKEN="${SONAR_ENT_TOKEN:-}"
+          [ -z "$TOKEN" ] && TOKEN="${SONARQUBE_API_TOKEN:-}"
+          [ -z "$TOKEN" ] && TOKEN="${SONAR_TOKEN:-}"
+          if [ -z "$TOKEN" ]; then
+            echo "::error::No Sonar token found. Set repo secret SONAR_ENT_TOKEN (or SONARQUBE_API_TOKEN / SONAR_TOKEN)."
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Resolve organization UUID
+        run: |
+          set -uo pipefail
+          if [ -n "$ORG_ID" ]; then
+            echo "Using supplied organization UUID: $ORG_ID"
+            echo "ORG_ID=$ORG_ID" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          curl -sS -u "$TOKEN:" "$WEB_HOST/api/organizations/search?member=true" -o orgs.json \
+            -w 'organizations/search -> HTTP %{http_code}\n'
+          RESOLVED=$(jq -r --arg k "$ORG_KEY" '.organizations[]? | select(.key==$k) | .id // empty' orgs.json 2>/dev/null | head -1)
+          echo "Resolved UUID for org '$ORG_KEY': ${RESOLVED:-<none>}"
+          echo "ORG_ID=$RESOLVED" >> "$GITHUB_ENV"
+
+      - name: Search users
+        run: |
+          set -uo pipefail
+
+          # Build the query string, skipping empty filters so we never send
+          # `q=&email=` style noise that some backends reject.
+          build_query() {
+            page="$1"
+            python3 - "$page" <<'PY'
+          import os, sys, urllib.parse
+          page = sys.argv[1]
+          pairs = [
+              ("q", os.environ.get("Q", "")),
+              ("email", os.environ.get("EMAIL", "")),
+              ("organizationIds", os.environ.get("ORG_ID", "")),
+              ("active", os.environ.get("ACTIVE", "")),
+              ("managed", os.environ.get("MANAGED", "")),
+              ("externalIdentity", os.environ.get("EXTERNAL_IDENTITY", "")),
+              ("groupId", os.environ.get("GROUP_ID", "")),
+              ("pageIndex", page),
+              ("pageSize", os.environ.get("PAGE_SIZE", "50")),
+          ]
+          print(urllib.parse.urlencode([(k, v) for k, v in pairs if v != ""]))
+          PY
+          }
+
+          fetch() {
+            page="$1"; out="$2"
+            qs=$(build_query "$page")
+            url="${API_BASE}${USERS_PATH}?${qs}"
+            echo "---- GET $url ----"
+            code=$(curl -sS -o "$out" -w '%{http_code}' --max-time 60 \
+                     -H "Authorization: Bearer $TOKEN" \
+                     -H "Accept: application/json" "$url" || echo 000)
+            echo "HTTP $code"
+            if [ "$code" = "401" ] || [ "$code" = "403" ]; then
+              echo "Bearer rejected; retrying with HTTP basic (token as username)."
+              code=$(curl -sS -o "$out" -w '%{http_code}' --max-time 60 \
+                       -u "$TOKEN:" -H "Accept: application/json" "$url" || echo 000)
+              echo "HTTP $code"
+            fi
+            echo "$code"> .last_code
+            head -c 400 "$out"; echo
+          }
+
+          fetch "$PAGE_INDEX" page-1.json
+          CODE=$(cat .last_code)
+          if [ "$CODE" != "200" ]; then
+            echo "::error::searchUsers returned HTTP $CODE from ${API_BASE}${USERS_PATH}. Run sonar-v2-users-discover.yml to find the correct base URL / path for this tenant."
+            cat page-1.json
+            exit 1
+          fi
+
+          jq -s '.[0]' page-1.json > users.json
+
+          if [ "$ALL_PAGES" = "true" ]; then
+            TOTAL=$(jq -r '.page.total // .paging.total // 0' page-1.json)
+            PSIZE=$(jq -r '.page.pageSize // .paging.pageSize // '"$PAGE_SIZE" page-1.json)
+            LAST=$(( (TOTAL + PSIZE - 1) / PSIZE ))
+            echo "total=$TOTAL pageSize=$PSIZE lastPage=$LAST"
+            p=2
+            while [ "$p" -le "$LAST" ]; do
+              fetch "$p" "page-$p.json"
+              [ "$(cat .last_code)" = "200" ] || break
+              p=$((p + 1))
+            done
+            jq -s '{users: (map(.users // .items // []) | add), pages: length}' page-*.json > users.json
+          fi
+
+          echo
+          echo "=== Users ==="
+          jq -r '(.users // .items // []) [] |
+                 "\(.id // .uuid // "-")\t\(.login // "-")\t\(.name // "-")\t\(.email // "-")\tactive=\(.active // "-")\tmanaged=\(.managed // "-")"' \
+            users.json || cat users.json
+
+          {
+            echo "### searchUsers"
+            echo
+            echo "\`GET ${API_BASE}${USERS_PATH}\`"
+            echo
+            echo "| id | login | name | email | active | managed |"
+            echo "|---|---|---|---|---|---|"
+            jq -r '(.users // .items // []) [] |
+                   "| \(.id // .uuid // "-") | \(.login // "-") | \(.name // "-") | \(.email // "-") | \(.active // "-") | \(.managed // "-") |"' \
+              users.json 2>/dev/null || echo "| (could not parse response) | | | | | |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonar-v2-users-search
+          path: |
+            users.json
+            page-*.json
+            orgs.json
+          if-no-files-found: ignore

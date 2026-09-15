@@ -1,0 +1,186 @@
+name: Sonar v2 - Users API - Discover
+
+# Locates the live v2 "users management" surface for the SonarQube Cloud US
+# region (https://sonarqube.us, org gourabd1ms) by probing a matrix of
+# host x base-path x auth-scheme and reporting which combination answers.
+#
+# Why this workflow exists: earlier probes in this repo (see
+# sonar-sot-probe2.yml) recorded that https://sonarqube.us/api/v2 answered
+# 404 "Unknown url", and that https://api.sonarqube.us fronts an AWS API
+# Gateway that answered 403. So the v2 base URL for this tenant is NOT a
+# settled fact - run this first, then feed the winning base URL into the
+# search / get / delete workflows via their `api_base` input.
+#
+# Read-only: every request is a GET.
+#
+# Token: uses the first of SONAR_ENT_TOKEN, SONARQUBE_API_TOKEN, SONAR_TOKEN
+# that is set as a repo secret.
+
+on:
+  workflow_dispatch:
+    inputs:
+      extra_base:
+        description: "Additional base URL to probe, e.g. https://sonarqube.us/api/v2"
+        required: false
+        type: string
+        default: ""
+      org_key:
+        description: "Organization key"
+        required: false
+        type: string
+        default: "gourabd1ms"
+      dump_openapi:
+        description: "Also try to download an OpenAPI/Swagger document from each base"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    env:
+      SONAR_ENT_TOKEN: ${{ secrets.SONAR_ENT_TOKEN }}
+      SONARQUBE_API_TOKEN: ${{ secrets.SONARQUBE_API_TOKEN }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      EXTRA_BASE: ${{ inputs.extra_base }}
+      ORG_KEY: ${{ inputs.org_key }}
+      DUMP_OPENAPI: ${{ inputs.dump_openapi }}
+      WEB_HOST: https://sonarqube.us
+    steps:
+      - name: Resolve token
+        run: |
+          set -uo pipefail
+          TOKEN="${SONAR_ENT_TOKEN:-}"
+          [ -z "$TOKEN" ] && TOKEN="${SONARQUBE_API_TOKEN:-}"
+          [ -z "$TOKEN" ] && TOKEN="${SONAR_TOKEN:-}"
+          if [ -z "$TOKEN" ]; then
+            echo "::error::No Sonar token found. Set repo secret SONAR_ENT_TOKEN (or SONARQUBE_API_TOKEN / SONAR_TOKEN)."
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Sanity check - classic v1 auth works at all
+        run: |
+          set -uo pipefail
+          echo "--- GET /api/authentication/validate (basic) ---"
+          curl -sS -u "$TOKEN:" "$WEB_HOST/api/authentication/validate" -w '\nHTTP %{http_code}\n'
+          echo "--- GET /api/users/current (basic) ---"
+          curl -sS -u "$TOKEN:" "$WEB_HOST/api/users/current" -w '\nHTTP %{http_code}\n' | head -c 1500
+          echo
+          echo "--- GET /api/organizations/search?member=true ---"
+          curl -sS -u "$TOKEN:" "$WEB_HOST/api/organizations/search?member=true" -o orgs.json -w 'HTTP %{http_code}\n'
+          jq -r '.organizations[]? | "key=\(.key)  id=\(.id // "n/a")  name=\(.name)"' orgs.json 2>/dev/null || head -c 800 orgs.json
+          ORG_UUID=$(jq -r --arg k "$ORG_KEY" '.organizations[]? | select(.key==$k) | .id // empty' orgs.json 2>/dev/null | head -1)
+          echo "ORG_UUID=${ORG_UUID}" >> "$GITHUB_ENV"
+          echo "Resolved organization UUID for $ORG_KEY: ${ORG_UUID:-<none>}"
+
+      - name: Probe v2 base x path x auth matrix
+        run: |
+          set -uo pipefail
+
+          BASES="
+          https://sonarqube.us/api/v2
+          https://api.sonarqube.us/v2
+          https://api.sonarqube.us
+          https://api.us.sonarcloud.io/v2
+          https://sonarcloud.io/api/v2
+          "
+          [ -n "${EXTRA_BASE:-}" ] && BASES="$BASES
+          $EXTRA_BASE"
+
+          PATHS="
+          /users-management/users
+          /users
+          /authorizations/users
+          /user-management/users
+          "
+
+          : > hits.txt
+
+          probe() {
+            base="$1"; path="$2"; scheme="$3"
+            url="${base}${path}"
+            case "$scheme" in
+              bearer) set -- -H "Authorization: Bearer $TOKEN" ;;
+              basic)  set -- -u "$TOKEN:" ;;
+              none)   set -- ;;
+            esac
+            code=$(curl -sS -o body.out -w '%{http_code}' --max-time 25 \
+                     -H "Accept: application/json" "$@" "$url" 2>/dev/null || echo "000")
+            snippet=$(head -c 160 body.out | tr '\n' ' ')
+            printf '%-46s %-22s %-7s %s\n' "$base" "$path" "$scheme" "$code"
+            case "$code" in
+              200|201|206)
+                echo "  BODY: $snippet"
+                echo "$code  $scheme  $url" >> hits.txt
+                ;;
+              400|401|403|405|422)
+                # Not 404: the route probably exists but auth/args are wrong.
+                echo "  BODY: $snippet"
+                echo "$code  $scheme  $url" >> hits.txt
+                ;;
+            esac
+          }
+
+          for base in $BASES; do
+            for path in $PATHS; do
+              for scheme in bearer basic; do
+                probe "$base" "$path" "$scheme"
+              done
+            done
+          done
+
+          echo
+          echo "=== Non-404 responses (candidate live routes) ==="
+          if [ -s hits.txt ]; then sort -u hits.txt; else echo "(none - every probe 404'd or failed)"; fi
+
+          {
+            echo "### v2 users API probe results"
+            echo
+            echo '```'
+            if [ -s hits.txt ]; then sort -u hits.txt; else echo "(none)"; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Try to fetch an OpenAPI document
+        if: ${{ inputs.dump_openapi }}
+        run: |
+          set -uo pipefail
+          for u in \
+            "https://sonarqube.us/api/v2/api-docs" \
+            "https://sonarqube.us/api/v2/openapi.json" \
+            "https://sonarqube.us/api/v2/openapi" \
+            "https://sonarqube.us/api/v2/swagger.json" \
+            "https://api.sonarqube.us/v2/openapi.json" \
+            "https://api.sonarqube.us/openapi.json" ; do
+            code=$(curl -sS -o doc.json -w '%{http_code}' --max-time 25 \
+                     -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" "$u" || echo 000)
+            echo "--- $u -> HTTP $code"
+            if [ "$code" = "200" ] && jq -e . doc.json >/dev/null 2>&1; then
+              echo "OpenAPI document found. User-related paths:"
+              jq -r '.paths | keys[]' doc.json 2>/dev/null | grep -i user || jq -r '.paths | keys[]' doc.json | head -50
+              cp doc.json openapi-found.json
+            fi
+          done
+
+      - name: Cross-check the classic web service catalog for user endpoints
+        run: |
+          set -uo pipefail
+          curl -sS -u "$TOKEN:" "$WEB_HOST/api/webservices/list?include_internals=true" -o ws.json -w 'HTTP %{http_code}\n'
+          echo "=== user/group related v1 endpoints (fallback if v2 is absent) ==="
+          jq -r '.webServices[] | .path as $p | .actions[] |
+            "\($p)/\(.key)\tinternal=\(.internal)\tparams=\([.params[]?.key] | join(","))"' ws.json \
+            | grep -iE "user|group|member|permission" || echo "(no matches)"
+
+      - name: Upload probe artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonar-v2-users-discover
+          path: |
+            hits.txt
+            orgs.json
+            ws.json
+            openapi-found.json
+          if-no-files-found: ignore
